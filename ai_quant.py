@@ -578,9 +578,9 @@ class BacktestEngine:
                 if stop_out:
                     position = 0
                     exit_val = holdings * price
-                    cash = cash + exit_val          # preserve any uninvested cash
+                    cost_basis_stop = holdings * entry_price   # must calc BEFORE zeroing holdings
+                    cash = cash + exit_val
                     holdings = 0
-                    cost_basis_stop = holdings * entry_price
                     pnl_dollar = exit_val - cost_basis_stop
                     pnl_pct = (pnl_dollar / cost_basis_stop * 100) if cost_basis_stop > 0 else 0
                     trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
