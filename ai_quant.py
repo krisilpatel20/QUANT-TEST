@@ -582,11 +582,11 @@ class BacktestEngine:
                     cash = cash + exit_val
                     holdings = 0
                     pnl_dollar = exit_val - cost_basis_stop
-                    pnl_pct = (pnl_dollar / cost_basis_stop * 100) if cost_basis_stop > 0 else 0
+                    pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
                     trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                    'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
                                    'Size (%)':round(position_size_pct*100,1),
-                                   'PnL (%)':round(pnl_pct,2),
+                                   'PnL (% of Capital)':round(pnl_pct,2),
                                    'PnL ($)':round(pnl_dollar,2),
                                    'Status':smsg})
                     equity_curve.append(cash); cooldown = 5; prev_sig = 0.0; continue
@@ -601,12 +601,12 @@ class BacktestEngine:
                 cash += exit_val
                 cost_basis = holdings * entry_price
                 pnl_dollar = exit_val - cost_basis
-                pnl_pct = (pnl_dollar / cost_basis * 100) if cost_basis > 0 else 0
+                pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
                 holdings = 0
                 trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
                                'Size (%)':round(position_size_pct*100,1),
-                               'PnL (%)':round(pnl_pct,2),
+                               'PnL (% of Capital)':round(pnl_pct,2),
                                'PnL ($)':round(pnl_dollar,2),
                                'Status':'Closed'})
             elif position == 1 and signal != prev_sig and signal > 0:
@@ -620,11 +620,11 @@ class BacktestEngine:
             open_val = holdings * cp
             cost_basis = holdings * entry_price
             pnl_dollar = open_val - cost_basis
-            pnl_pct = (pnl_dollar / cost_basis * 100) if cost_basis > 0 else 0
+            pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
             trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':None,
                            'Buy Price':round(entry_price,2),'Sell Price':round(cp,2),
                            'Size (%)':round(position_size_pct*100,1),
-                           'PnL (%)':round(pnl_pct,2),
+                           'PnL (% of Capital)':round(pnl_pct,2),
                            'PnL ($)':round(pnl_dollar,2),
                            'Status':'Open'})
             equity_curve[-1] = cash + holdings*cp
@@ -2314,7 +2314,7 @@ with tab7:
             for dc in ['Entry Date','Exit Date']:
                 if dc in td.columns:
                     td[dc] = pd.to_datetime(td[dc]).apply(lambda x: x.date() if pd.notnull(x) else "Open")
-            fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (%)": "{:.2f}%"}
+            fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (% of Capital)": "{:.2f}%"}
             if 'Size (%)' in td.columns:
                 fmt['Size (%)'] = "{:.1f}%"
             if 'PnL ($)' in td.columns:
