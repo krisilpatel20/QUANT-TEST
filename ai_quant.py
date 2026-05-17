@@ -599,7 +599,7 @@ class BacktestEngine:
             else:
                 current_val = cash
 
-            if position == 0 and signal == 1 and cooldown_bars == 0:
+            if position == 0 and signal > 0 and cooldown_bars == 0:
                 position = 1
                 entry_price = price
                 entry_date = date
