@@ -15,44 +15,44 @@ from datetime import datetime, timedelta
 import io, time, warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 warnings.filterwarnings("ignore")
- 
+
 try:
     from fpdf import FPDF
     import xlsxwriter
     EXPORT_AVAILABLE = True
 except ImportError:
     EXPORT_AVAILABLE = False
- 
+
 try:
     from arch import arch_model
     ARCH_AVAILABLE = True
 except ImportError:
     ARCH_AVAILABLE = False
- 
+
 try:
     import sklearn
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
- 
+
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
- 
+
 st.set_page_config(page_title="Unified Quant Suite", layout="wide", page_icon="📊")
 plt.style.use("ggplot")
- 
+
 st.title("📊 Unified Quant Suite — Thesis + IV Scanner")
 st.markdown("""
 **Robust Financial Modeling Dashboard** incorporating:
 GARCH/EGARCH | Regime Switching | Jump Diffusion | Heston | Kalman Filter | Macro Factors | **Institutional IV Scanner**
 """)
- 
+
 if not ARCH_AVAILABLE:
     st.error("⚠️ 'arch' library not installed. Run: pip install arch")
- 
+
 # ==========================================
 # HELPER FUNCTIONS & CLASSES
 # ==========================================
- 
+
 def format_plot_dates(ax, dates):
     if len(dates) == 0:
         return
@@ -66,7 +66,7 @@ def format_plot_dates(ax, dates):
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%b-%y'))
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=90, ha='center', fontsize=8)
- 
+
 def highlight_plotly_zones(fig, mask, color, opacity=0.15, row=None, col=None):
     if not isinstance(mask, pd.Series) or not mask.any():
         return
@@ -83,8 +83,8 @@ def highlight_plotly_zones(fig, mask, color, opacity=0.15, row=None, col=None):
             else:
                 fig.add_vrect(x0=x0, x1=x1, fillcolor=color, opacity=opacity,
                               layer="below", line_width=0)
- 
- 
+
+
 # ── CALIBRATOR ──────────────────────────────────────────────────────────────
 class Calibrator:
     @staticmethod
@@ -107,14 +107,14 @@ class Calibrator:
         mu = np.mean(returns) / dt + 0.5 * np.mean(variance)
         return {'mu': mu, 'kappa': kappa, 'theta': theta, 'xi': xi,
                 'rho': rho, 'v0': variance[-1], 'S0': 100.0}
- 
- 
+
+
 # ── KALMAN FILTERS ───────────────────────────────────────────────────────────
 class KalmanFilterReg:
     def __init__(self, delta=1e-4, R=1e-3):
         self.delta = delta; self.R = R
         self.trans_cov = delta / (1 - delta) * np.eye(2)
- 
+
     def run_filter(self, y, x):
         n = len(y)
         state_mean = np.zeros((n, 2)); state_cov = np.zeros((n, 2, 2))
@@ -129,12 +129,12 @@ class KalmanFilterReg:
             state_mean[t] = pred_state + K.flatten() * error
             state_cov[t] = pred_cov - np.dot(np.dot(K, obs_mat), pred_cov)
         return state_mean, state_cov
- 
- 
+
+
 class KalmanFilterTrend:
     def __init__(self, process_noise=1e-5, measurement_noise=1e-3):
         self.Q = process_noise; self.R = measurement_noise
- 
+
     def filter(self, data):
         n = len(data)
         estimates = np.zeros(n); covariances = np.zeros(n)
@@ -148,7 +148,7 @@ class KalmanFilterTrend:
             P = (1 - K) * P_pred
             estimates[t] = x; covariances[t] = P
         return estimates, covariances
- 
+
     def smooth(self, data):
         n = len(data)
         filtered_means, filtered_covs = self.filter(data)
@@ -160,8 +160,8 @@ class KalmanFilterTrend:
             smoothed_means[t] = filtered_means[t] + J * (smoothed_means[t+1] - filtered_means[t])
             smoothed_covs[t] = filtered_covs[t] + J**2 * (smoothed_covs[t+1] - P_pred)
         return smoothed_means, smoothed_covs
- 
- 
+
+
 # ── STOCHASTIC MODELS ─────────────────────────────────────────────────────────
 def simulate_heston(S0, T, r, kappa, theta, sigma, rho, v0, steps, paths):
     dt = T / steps
@@ -177,8 +177,8 @@ def simulate_heston(S0, T, r, kappa, theta, sigma, rho, v0, steps, paths):
         prices[t] = prices[t-1] + r * prices[t-1] * dt + \
                     np.sqrt(v_curr) * prices[t-1] * np.sqrt(dt) * Z1
     return prices, vols
- 
- 
+
+
 def merton_jump_diffusion(S0, T, r, sigma, lam, mu_j, sigma_j, steps, paths):
     dt = T / steps
     prices = np.zeros((steps + 1, paths)); prices[0] = S0
@@ -189,20 +189,20 @@ def merton_jump_diffusion(S0, T, r, sigma, lam, mu_j, sigma_j, steps, paths):
         J = np.random.normal(mu_j, sigma_j, size=paths) * N
         prices[t] = prices[t-1] * np.exp(drift * dt + sigma * np.sqrt(dt) * z + J)
     return prices
- 
- 
+
+
 # ── REALIZED VOLATILITY ───────────────────────────────────────────────────────
 class RealizedVolatility:
     @staticmethod
     def realized_variance(returns):
         return np.sum(returns**2)
- 
+
     @staticmethod
     def bipower_variation(returns):
         if len(returns) < 2: return 0.0
         abs_rets = np.abs(returns)
         return (np.pi / 2) * np.sum(abs_rets[1:] * abs_rets[:-1])
- 
+
     @staticmethod
     def jump_component(returns):
         rv = RealizedVolatility.realized_variance(returns)
@@ -215,20 +215,20 @@ class RealizedVolatility:
         z_score = (jump_ratio - 0.05) * np.sqrt(n / 2)
         p_value = 1 - stats.norm.cdf(z_score)
         return {'jump_ratio': jump_ratio, 'p_value': p_value, 'z_score': z_score}
- 
- 
+
+
 # ── HAWKES VOLATILITY ─────────────────────────────────────────────────────────
 class HawkesVolatility:
     def __init__(self):
         self.mu = 0.5; self.alpha = 0.5; self.beta = 2.0
- 
+
     def fit(self, returns):
         vol_proxy = np.abs(returns)
         if len(vol_proxy) < 20: return self
         threshold = np.percentile(vol_proxy, 90)
         events = np.where(vol_proxy > threshold)[0]
         if len(events) < 5: return self
- 
+
         def neg_ll(params):
             mu_p, alpha_p, beta_p = params
             if mu_p <= 0 or alpha_p < 0 or beta_p <= alpha_p: return 1e9
@@ -241,7 +241,7 @@ class HawkesVolatility:
             term1 = np.sum(np.log(intensities))
             term2 = mu_p * T_end + (alpha_p / beta_p) * np.sum(1 - np.exp(-beta_p * (T_end - t)))
             return -(term1 - term2)
- 
+
         try:
             res = minimize(neg_ll, [0.1, 0.2, 1.0],
                            bounds=[(1e-4, 2.0), (1e-4, 5.0), (0.1, 10.0)], method='L-BFGS-B')
@@ -249,21 +249,21 @@ class HawkesVolatility:
         except:
             pass
         return self
- 
+
     def branching_ratio(self):
         return self.alpha / self.beta if self.beta != 0 else 0.0
- 
+
     def half_life(self):
         return np.log(2) / self.beta if self.beta != 0 else 0.0
- 
- 
+
+
 # ── PRO REGIME DETECTOR ───────────────────────────────────────────────────────
 class ProRegimeDetector:
     def __init__(self, prices, log_returns):
         self.prices = prices if isinstance(prices, pd.Series) else pd.Series(prices)
         self.returns = log_returns if isinstance(log_returns, pd.Series) else pd.Series(log_returns)
         self.features = None; self.regimes = {}; self.metrics = {}; self.state_labels = {}
- 
+
     def _prepare_features(self):
         f1 = self.returns.rolling(window=5).mean().fillna(0)
         vol = self.returns.rolling(window=20).std().bfill()
@@ -274,7 +274,7 @@ class ProRegimeDetector:
         f3 = ((self.prices - ema) / (ema + 1e-9)).fillna(0)
         self.features = np.column_stack([f1.values, f2.values, f3.values])
         return self.features
- 
+
     def fit(self, n_states=4):
         X = self._prepare_features()
         if not SKLEARN_AVAILABLE:
@@ -317,7 +317,7 @@ class ProRegimeDetector:
         self.regimes['states'] = states; self.regimes['probs'] = probs
         self.metrics['aic'] = model.aic(X_scaled); self.metrics['bic'] = model.bic(X_scaled)
         self.metrics['n_states'] = n_states
- 
+
     def fit_optimized(self, state_choices=[2, 3, 4]):
         best_bic = float('inf'); best_n = 4
         for n in state_choices:
@@ -327,7 +327,7 @@ class ProRegimeDetector:
                     best_bic = tmp.metrics['bic']; best_n = n
             except: continue
         self.fit(n_states=best_n); return best_n
- 
+
     def get_latest_verdict(self):
         if 'states' not in self.regimes or not self.state_labels:
             return "NEUTRAL", 0.0, "N/A"
@@ -341,14 +341,14 @@ class ProRegimeDetector:
         else:
             verdict = "NEUTRAL"
         return verdict, last_prob, label
- 
- 
+
+
 # ── SML ANALYZER ──────────────────────────────────────────────────────────────
 class SMLAnalyzer:
     def __init__(self, ticker_returns, benchmark_returns, rf_annual=0.04):
         self.r_asset = ticker_returns; self.r_bench = benchmark_returns
         self.rf_annual = rf_annual; self.rf_daily = rf_annual / 252
- 
+
     def calculate_metrics(self, window=90):
         common_idx = self.r_asset.index.intersection(self.r_bench.index)
         y = self.r_asset.loc[common_idx] - self.rf_daily
@@ -369,8 +369,8 @@ class SMLAnalyzer:
         df['Actual_Return_Ann'] = (df['asset_ex'].rolling(window).mean() * 252) + self.rf_annual
         df['Mispricing_Spread'] = df['Actual_Return_Ann'] - df['SML_Exp_Return']
         return df.dropna()
- 
- 
+
+
 # ── MAD TREND MODES ───────────────────────────────────────────────────────────
 class MADTrendModes:
     @staticmethod
@@ -452,8 +452,8 @@ class MADTrendModes:
                          (c_sig<c_ts)&(c_sig.shift(1)>=c_ts), src.index)
         fs = bb_sc if mode=="Bollinger Bands" else (fl_sc if mode=="For Loop" else c_sc)
         return (fs == 1).astype(int)
- 
- 
+
+
 # ── EHLERS FILTERS ────────────────────────────────────────────────────────────
 class EhlersFilters:
     @staticmethod
@@ -464,7 +464,7 @@ class EhlersFilters:
         for i in range(len(prices)):
             filt[i] = pv[i] if i < 2 else c1*(pv[i]+pv[i-1])/2+c2*filt[i-1]+c3*filt[i-2]
         return pd.Series(filt, index=prices.index)
- 
+
     @staticmethod
     def simple_decycler(prices, period=60):
         a1 = (np.cos(0.707*2*np.pi/period)+np.sin(0.707*2*np.pi/period)-1)/np.cos(0.707*2*np.pi/period)
@@ -473,8 +473,8 @@ class EhlersFilters:
             hp[i] = 0 if i < 2 else ((1-a1/2)**2)*(pv[i]-2*pv[i-1]+pv[i-2]) + \
                     2*(1-a1)*hp[i-1]-((1-a1)**2)*hp[i-2]
         return pd.Series(pv-hp, index=prices.index)
- 
- 
+
+
 # ── VOL-TARGETED SIZING (FIX 1) ───────────────────────────────────────────────
 def vol_targeted_signal(raw_signal, garch_res, target_vol_annual=0.15):
     """Converts binary 0/1 signal to fractional 0.0-1.0 using vol targeting."""
@@ -486,8 +486,8 @@ def vol_targeted_signal(raw_signal, garch_res, target_vol_annual=0.15):
     vol = cond_vol.loc[common]
     size = np.minimum(1.0, target_vol_annual / (vol + 1e-9))
     return (sig * size).fillna(0.0)
- 
- 
+
+
 # ── IMPROVED HURST SIGNAL (FIX 2) ────────────────────────────────────────────
 def rolling_hurst(prices, window=100, max_lag=20):
     log_prices = np.log(prices)
@@ -496,8 +496,8 @@ def rolling_hurst(prices, window=100, max_lag=20):
         tau = [max(np.std(x[lag:]-x[:-lag]), 1e-8) for lag in lags]
         return np.polyfit(np.log(lags), np.log(tau), 1)[0]
     return log_prices.rolling(window).apply(hurst_val, raw=True)
- 
- 
+
+
 def hurst_confirmed_signal(prices_bt, hurst_window=100, trend_thresh=0.55,
                             mr_thresh=0.45, confirm_bars=5):
     """
@@ -505,18 +505,18 @@ def hurst_confirmed_signal(prices_bt, hurst_window=100, trend_thresh=0.55,
     H>0.55 confirmed -> momentum, H<0.45 confirmed -> mean reversion, else -> cash.
     """
     hurst_series = rolling_hurst(prices_bt, window=hurst_window)
- 
+
     def confirmed(h, threshold, above=True):
         raw = (h > threshold).astype(int) if above else (h < threshold).astype(int)
         return raw.rolling(confirm_bars).min().fillna(0).astype(int)
- 
+
     is_trending = confirmed(hurst_series, trend_thresh, above=True)
     is_mr = confirmed(hurst_series, mr_thresh, above=False)
- 
+
     ema_fast = prices_bt.ewm(span=20, adjust=False).mean()
     ema_slow = prices_bt.ewm(span=50, adjust=False).mean()
     trend_sig = (ema_fast > ema_slow).astype(int)
- 
+
     bb_ma = prices_bt.rolling(20).mean()
     bb_std = prices_bt.rolling(20).std()
     bb_lower = bb_ma - 2*bb_std
@@ -524,13 +524,13 @@ def hurst_confirmed_signal(prices_bt, hurst_window=100, trend_thresh=0.55,
     mr_raw.loc[prices_bt < bb_lower] = 1
     mr_raw.loc[prices_bt > bb_ma] = 0
     mr_sig = mr_raw.ffill().fillna(0)
- 
+
     signals = pd.Series(0, index=prices_bt.index)
     signals[is_trending == 1] = trend_sig[is_trending == 1]
     signals[is_mr == 1] = mr_sig[is_mr == 1]
     return signals.fillna(0), hurst_series, is_trending, is_mr
- 
- 
+
+
 # ── GARCH VOL FILTER (FIX 3) ─────────────────────────────────────────────────
 def garch_vol_filter_signal(prices_bt, returns_bt, base_signal, target_vol_pct=15.0):
     """
@@ -546,8 +546,8 @@ def garch_vol_filter_signal(prices_bt, returns_bt, base_signal, target_vol_pct=1
         return vol_targeted_signal(base_signal, res, target_vol_annual=target_vol_pct/100.0)
     except:
         return base_signal.astype(float)
- 
- 
+
+
 # ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
 class BacktestEngine:
     @staticmethod
@@ -560,13 +560,13 @@ class BacktestEngine:
         trades = []; position = 0; entry_price = 0; entry_date = None
         max_price = 0; cash = initial_capital; holdings = 0
         cooldown = 0; prev_sig = 0.0
- 
+
         for date, price, signal in zip(prices.index, prices, signals):
             signal = float(signal)
             if cooldown > 0:
                 cooldown -= 1
                 if signal == 0: cooldown = 0
- 
+
             if position == 1:
                 stop_out = False; smsg = ""
                 if stop_loss_pct > 0 and price <= entry_price*(1-stop_loss_pct):
@@ -576,40 +576,60 @@ class BacktestEngine:
                     if price <= max_price*(1-trailing_stop_pct):
                         stop_out = True; smsg = 'Trailing Stop'
                 if stop_out:
-                    position = 0; cash = holdings*price; holdings = 0
-                    pnl = (price-entry_price)/entry_price
+                    position = 0
+                    exit_val = holdings * price
+                    cash = cash + exit_val          # preserve any uninvested cash
+                    holdings = 0
+                    pnl = (price - entry_price) / entry_price
+                    cost_basis_stop = (exit_val / price) * entry_price   # approx shares * entry
+                    pnl_dollar = exit_val - cost_basis_stop
                     trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                    'Buy Price':entry_price,'Sell Price':price,
-                                   'PnL (%)':pnl*100,'Status':smsg})
+                                   'PnL (%)':round(pnl*100,2),
+                                   'PnL ($)':round(pnl_dollar,2),
+                                   'Status':smsg})
                     equity_curve.append(cash); cooldown = 5; prev_sig = 0.0; continue
- 
+
             if position == 0 and signal > 0 and cooldown == 0:
                 position = 1; entry_price = price; entry_date = date; max_price = price
                 invest = cash * signal; holdings = invest/price; cash -= invest
             elif position == 1 and signal == 0:
-                position = 0; cash += holdings*price
-                pnl = (price-entry_price)/entry_price; holdings = 0
+                position = 0
+                exit_val = holdings * price
+                cash += exit_val
+                pnl = (price - entry_price) / entry_price
+                cost_basis = holdings * entry_price
+                pnl_dollar = exit_val - cost_basis
+                holdings = 0
                 trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                'Buy Price':entry_price,'Sell Price':price,
-                               'PnL (%)':pnl*100,'Status':'Closed'})
+                               'PnL (%)':round(pnl*100,2),
+                               'PnL ($)':round(pnl_dollar,2),
+                               'Status':'Closed'})
             elif position == 1 and signal != prev_sig and signal > 0:
                 total = cash + holdings*price
                 holdings = (total*signal)/price; cash = total - holdings*price
             prev_sig = signal
             equity_curve.append((cash+holdings*price) if position==1 else cash)
- 
+
         if position == 1:
-            cp = prices.iloc[-1]; pnl = (cp-entry_price)/entry_price
+            cp = prices.iloc[-1]
+            pnl = (cp - entry_price) / entry_price
+            open_val = holdings * cp
+            cost_basis = holdings * entry_price
+            pnl_dollar = open_val - cost_basis
             trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':None,
                            'Buy Price':entry_price,'Sell Price':cp,
-                           'PnL (%)':pnl*100,'Status':'Open'})
-            equity_curve[-1] = cash+holdings*cp
- 
+                           'PnL (%)':round(pnl*100,2),
+                           'PnL ($)':round(pnl_dollar,2),
+                           'Status':'Open'})
+            equity_curve[-1] = cash + holdings*cp
+
         eq = pd.Series(equity_curve[1:], index=prices.index)
         bm = initial_capital*(1+returns).cumprod()
         return {'equity_curve':eq,'benchmark_curve':bm,
                 'trades':pd.DataFrame(trades),'returns':eq.pct_change().fillna(0)}
- 
+
     @staticmethod
     def calculate_metrics(returns, risk_free_rate=0.0):
         if len(returns) < 2: return {}
@@ -622,7 +642,7 @@ class BacktestEngine:
         n_years = len(returns)/252
         cagr = ((1+returns).prod()**(1/n_years)-1) if n_years>0 else 0
         return {'Sharpe Ratio':sharpe,'Sortino Ratio':sortino,'Max Drawdown':max_dd,'CAGR':cagr}
- 
+
 # ── REGIME MODEL FIT (CACHED) ─────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fit_regime_model(model_data, n_regimes, switch_vol, switch_trend, search_reps=20):
@@ -647,8 +667,8 @@ def fit_regime_model(model_data, n_regimes, switch_vol, switch_trend, search_rep
         return res
     except Exception as e:
         st.error(f"Fit failed: {e}"); return None
- 
- 
+
+
 # ── MASTER SIGNAL ENGINE ──────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_master_signal(ticker, df, n_regimes=4, freq='Daily', opt_goal='Robustness (BIC)',
@@ -666,7 +686,7 @@ def get_master_signal(ticker, df, n_regimes=4, freq='Daily', opt_goal='Robustnes
             df['Returns'] = df['Close'].pct_change()
             df = df.replace([np.inf,-np.inf], np.nan).dropna()
         if len(df) < 15: return None
- 
+
         if engine == 'Markov':
             if n_regimes == 'Auto':
                 best_n=4; best_sc=-float('inf') if opt_goal=='Performance (PnL)' else float('inf')
@@ -706,12 +726,12 @@ def get_master_signal(ticker, df, n_regimes=4, freq='Daily', opt_goal='Robustnes
             sig, prob, lbl = p_detector.get_latest_verdict()
             regime_data = {'label': lbl, 'confidence': prob,
                            'n_states': p_detector.metrics.get('n_states', 4)}
- 
+
         kf = KalmanFilterTrend(process_noise=1e-4, measurement_noise=1e-2)
         trend_est, _ = kf.filter(df['Close'].values)
         last_price = df['Close'].iloc[-1]; last_trend = trend_est[-1]
         trend_diff = (last_price - last_trend) / (last_trend + 1e-9)
- 
+
         rs = (df['Returns']*100).replace([np.inf,-np.inf], np.nan).dropna()
         if len(rs) < 15: return None
         am = arch_model(rs, vol='Garch', p=1, q=1, dist='Normal')
@@ -719,10 +739,10 @@ def get_master_signal(ticker, df, n_regimes=4, freq='Daily', opt_goal='Robustnes
         curr_vol = garch_res.conditional_volatility.iloc[-1]
         avg_vol = garch_res.conditional_volatility.mean()
         vol_state = "HIGH" if curr_vol > avg_vol*1.2 else "LOW" if curr_vol < avg_vol*0.8 else "NORMAL"
- 
+
         jump_res = RealizedVolatility.jump_component(df['Returns'].values)
         jump_detected = jump_res['p_value'] < 0.05
- 
+
         score = 0
         if "LONG" in sig: score += 2
         if "SHORT" in sig: score -= 2
@@ -731,15 +751,15 @@ def get_master_signal(ticker, df, n_regimes=4, freq='Daily', opt_goal='Robustnes
         if vol_state == "LOW": score += 1
         if vol_state == "HIGH": score -= 1
         if jump_detected: score -= 1
- 
+
         return {'regime_sig': sig, 'regime_label': lbl, 'regime_data': regime_data,
                 'regime_prob': prob, 'pro_detector': p_detector, 'trend_diff': trend_diff,
                 'vol_state': vol_state, 'curr_vol': curr_vol, 'jump_detected': jump_detected,
                 'sentiment_score': score, 'garch_res': garch_res}
     except Exception as e:
         st.error(f"Error in Decision Engine for {ticker}: {e}"); return None
- 
- 
+
+
 # ── DATA LOADING ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=60)
 def load_data(ticker, start, end, interval='1d'):
@@ -758,8 +778,8 @@ def load_data(ticker, start, end, interval='1d'):
         return df.replace([np.inf,-np.inf], np.nan).dropna()
     except Exception as e:
         st.error(f"Error loading {ticker}: {e}"); return None
- 
- 
+
+
 @st.cache_data(ttl=3600)
 def load_fred_data(series_id):
     try:
@@ -769,16 +789,16 @@ def load_fred_data(series_id):
         df[series_id] = pd.to_numeric(df[series_id], errors='coerce')
         return df
     except: return None
- 
- 
+
+
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
     try:
         return pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
     except:
         return ["AAPL","MSFT","AMZN","GOOG","NVDA","META","TSLA","BRK-B","UNH","JNJ"]
- 
- 
+
+
 @st.cache_data(ttl=86400)
 def get_nasdaq100_tickers():
     try:
@@ -788,8 +808,8 @@ def get_nasdaq100_tickers():
         return tables[4].iloc[:,1].tolist()
     except:
         return ["AAPL","MSFT","AMZN","GOOG","NVDA","META","TSLA","PEP","AVGO","COST"]
- 
- 
+
+
 @st.cache_data(ttl=86400)
 def get_total_us_stocks():
     import requests
@@ -803,13 +823,13 @@ def get_total_us_stocks():
             if len(tickers) > 5000: return tickers
     except: pass
     return get_sp500_tickers()
- 
- 
+
+
 def get_market_cap(ticker):
     try: return yf.Ticker(ticker).info.get('marketCap', 0)
     except: return 0
- 
- 
+
+
 def get_analyst_target(ticker):
     try:
         info = yf.Ticker(ticker).info
@@ -818,8 +838,8 @@ def get_analyst_target(ticker):
         if target and current: return target, np.log(target/current)
         return None, None
     except: return None, None
- 
- 
+
+
 def calculate_beta(ticker_returns, benchmark_ticker='SPY', lookback_years=2):
     try:
         end = datetime.now(); start = end - timedelta(days=lookback_years*365)
@@ -833,16 +853,16 @@ def calculate_beta(ticker_returns, benchmark_ticker='SPY', lookback_years=2):
         y = ticker_returns.loc[common]; x = bench_ret.loc[common]
         return np.cov(y, x)[0,1] / np.var(x)
     except: return 1.0
- 
- 
+
+
 # ── REPORT GENERATOR ──────────────────────────────────────────────────────────
 class ReportGenerator:
     def __init__(self, ticker, start_date, end_date):
         self.ticker = ticker; self.start_date = start_date
         self.end_date = end_date; self.data_store = {}; self.plots = {}
- 
+
     def add_data(self, key, df_or_dict): self.data_store[key] = df_or_dict
- 
+
     def add_plot(self, key, fig):
         buf = io.BytesIO()
         if hasattr(fig, 'savefig'): fig.savefig(buf, format='png', bbox_inches='tight')
@@ -851,7 +871,7 @@ class ReportGenerator:
             except: return
         else: return
         buf.seek(0); self.plots[key] = buf
- 
+
     def generate_excel(self):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -862,7 +882,7 @@ class ReportGenerator:
                     pd.DataFrame(list(data.items()), columns=['Metric','Value']).to_excel(
                         writer, sheet_name=sn, index=False)
         return output.getvalue()
- 
+
     def generate_pdf(self):
         pdf = FPDF(); pdf.set_auto_page_break(auto=True, margin=15); pdf.add_page()
         pdf.set_font("Arial",'B',24); pdf.set_text_color(44,62,80)
@@ -893,8 +913,8 @@ class ReportGenerator:
             if pdf.get_y() > 230: pdf.add_page()
         raw = pdf.output()
         return bytes(raw) if isinstance(raw, bytearray) else raw
- 
- 
+
+
 # ── FED DATA ──────────────────────────────────────────────────────────────────
 FED_ASSETS = {
     "WGCAL":"Gold Certificate Account","SDRACL":"SDR Certificate Account",
@@ -908,8 +928,8 @@ FED_LIABILITIES = {
     "WLFN":"Federal Reserve Notes","WDFOL":"Foreign Official Deposits",
     "WDLTCL":"Term Deposits"
 }
- 
- 
+
+
 # ==========================================
 # TRADE INTELLIGENCE MODULE (7-Layer System)
 # Embedded inline — no external file needed
@@ -948,7 +968,7 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
- 
+
 st.set_page_config(page_title="Quant Thesis: Advanced Models (Filtered)", layout="wide")
 plt.style.use('ggplot')
 st.title("Results of Advanced Quantitative Thesis (Filtered Probabilities)")
@@ -958,12 +978,12 @@ GARCH/EGARCH | Regime Switching (Filtered) | Jump Diffusion | Heston Stochastic 
 """)
 if not ARCH_AVAILABLE:
     st.error("⚠️ The 'arch' library is not installed. GARCH/EGARCH modules will be limited. Run `pip install arch`.")
- 
+
 # ==========================================
 # TRADE INTELLIGENCE MODULE (7-Layer System)
 # ==========================================
 # Embedded directly — no separate file needed
- 
+
 SECTOR_ETF_MAP = {
     "AAPL":"XLK","MSFT":"XLK","NVDA":"SOXX","AMD":"SOXX","INTC":"SOXX",
     "AVGO":"SOXX","QCOM":"SOXX","MU":"SOXX","AMAT":"SOXX","LRCX":"SOXX",
@@ -984,7 +1004,7 @@ SECTOR_NAMES = {
     "XLE":"Energy","XLB":"Materials","XLU":"Utilities",
     "XLRE":"Real Estate","XLI":"Industrials","XLP":"Consumer Staples",
 }
- 
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _ti_fetch_history(ticker: str, period: str = "1y"):
     try:
@@ -994,7 +1014,7 @@ def _ti_fetch_history(ticker: str, period: str = "1y"):
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
         return df[['Open','High','Low','Close','Volume']].dropna()
     except: return None
- 
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _ti_fetch_earnings(ticker: str):
     try:
@@ -1009,7 +1029,7 @@ def _ti_fetch_earnings(ticker: str):
                 return pd.Timestamp(ed[0]).date()
         return None
     except: return None
- 
+
 def _ti_market_condition() -> dict:
     result = {'spy_trend':'Unknown','qqq_trend':'Unknown','iwm_trend':'Unknown',
                'vix_level':None,'vix_signal':'Unknown','breadth_score':0,
@@ -1069,7 +1089,7 @@ def _ti_market_condition() -> dict:
     elif index_score >= -2: result['market_verdict'] = "BEAR BIAS — Avoid new longs, tight stops"; result['market_color'] = "#ff8844"
     else: result['market_verdict'] = "STRONG BEAR — Cash is king, no new longs"; result['market_color'] = "#ff4444"
     return result
- 
+
 def _ti_sector_strength(ticker: str, stock_df: pd.DataFrame) -> dict:
     sector_etf = SECTOR_ETF_MAP.get(ticker.upper())
     result = {'sector_etf':sector_etf,
@@ -1123,7 +1143,7 @@ def _ti_sector_strength(ticker: str, stock_df: pd.DataFrame) -> dict:
     elif sc==0: result['sector_verdict']=f"NEUTRAL ({result['sector_name']} mixed)"; result['sector_color']="#ffcc00"
     else: result['sector_verdict']=f"SECTOR HEADWIND ({result['sector_name']} weak — caution)"; result['sector_color']="#ff4444"
     return result
- 
+
 def _ti_price_action(df: pd.DataFrame) -> dict:
     result={'pattern':'Unknown','pattern_score':0,'trend_structure':'Unknown',
              'entry_type':'No clean entry yet','patterns':[],'details':{}}
@@ -1181,7 +1201,7 @@ def _ti_price_action(df: pd.DataFrame) -> dict:
     elif lhh or ll2: result['entry_type']="❌ Lower High Rejection — Avoid Longs"
     else: result['entry_type']="👀 Watch — No High-Conviction Setup"
     return result
- 
+
 def _ti_support_resistance(df: pd.DataFrame) -> dict:
     result={'nearest_support':None,'nearest_resistance':None,'risk_reward':None,
              'rr_verdict':'Unknown','support_levels':[],'resistance_levels':[],'details':{}}
@@ -1213,7 +1233,7 @@ def _ti_support_resistance(df: pd.DataFrame) -> dict:
     elif rr>=1.0: result['rr_verdict']="MARGINAL R:R — Reduce size"; result['rr_color']="#ff8844"
     else: result['rr_verdict']="POOR R:R (<1:1) — Skip ❌"; result['rr_color']="#ff4444"
     return result
- 
+
 def _ti_volume_liquidity(df: pd.DataFrame, ticker: str) -> dict:
     result={'avg_dollar_vol':None,'rvol':None,'vol_trend':'Unknown',
              'liquidity_ok':False,'options_liquid':False,'details':{}}
@@ -1243,7 +1263,7 @@ def _ti_volume_liquidity(df: pd.DataFrame, ticker: str) -> dict:
     elif rvol>1.2: result['liquidity_verdict']=f"✅ Liquid + Above-avg volume ({rvol:.1f}x)"; result['liquidity_color']="#44cc66"
     else: result['liquidity_verdict']=f"✅ Liquid but low RVOL ({rvol:.1f}x) — watch for confirmation"; result['liquidity_color']="#ffcc00"
     return result
- 
+
 def _ti_earnings_risk(ticker: str) -> dict:
     result={'next_earnings':None,'days_to_earnings':None,'earnings_risk':'Unknown',
              'earnings_color':'#aaaaaa','macro_events':[],'risk_score':0,'details':{}}
@@ -1269,7 +1289,7 @@ def _ti_earnings_risk(ticker: str) -> dict:
         result['details']={'short_pct':round(sp*100,1),'beta':round(beta,2),'sector':info.get('sector','N/A')}
     except: pass
     return result
- 
+
 def _ti_compute_all(ticker: str) -> dict:
     df = _ti_fetch_history(ticker, "1y")
     with st.spinner("Layer 1: Market condition..."): market = _ti_market_condition()
@@ -1300,7 +1320,7 @@ def _ti_compute_all(ticker: str) -> dict:
     return {'ticker':ticker,'df':df,'market':market,'sector':sector,'price_action':pa,
             'sr':sr,'volume':volume,'earnings':earnings,'composite_score':composite,
             'final_verdict':final_verdict,'final_color':final_color,'entry_type':entry_type}
- 
+
 def render_trade_intelligence(default_ticker: str = "AAPL"):
     st.write("### 🎯 Trade Intelligence — 7-Layer Institutional Confirmation")
     st.markdown("""
@@ -1527,9 +1547,9 @@ def render_trade_intelligence(default_ticker: str = "AAPL"):
         fig_sc.add_hline(y=0,line_color="white",opacity=0.5)
         fig_sc.update_layout(title="Layer Score Breakdown",template="plotly_dark",height=260,margin=dict(t=30,b=10))
         st.plotly_chart(fig_sc,use_container_width=True)
- 
- 
- 
+
+
+
 # ==========================================
 # SIDEBAR
 # ==========================================
@@ -1542,30 +1562,30 @@ with st.sidebar:
         CURRENCY="$"; BENCHMARK="GC=F"; DEFAULT_RF=4.0; SUFFIX=""
     else:
         CURRENCY="$"; BENCHMARK="SPY"; DEFAULT_RF=4.0; SUFFIX=""
- 
+
     col_t1,col_t2 = st.columns(2)
     with col_t1:
         raw_ticker = st.text_input("Main Ticker","RELIANCE" if market_region=="Indian Market (INR)" else "AAPL").upper()
     with col_t2:
         raw_pair = st.text_input("Pair Ticker","").upper()
- 
+
     TICKER = raw_ticker+SUFFIX if (SUFFIX and not raw_ticker.endswith(SUFFIX)) else raw_ticker
     PAIR_TICKER = raw_pair+SUFFIX if (SUFFIX and raw_pair and not raw_pair.endswith(SUFFIX)) else raw_pair
     st.caption(f"Active Ticker: **{TICKER}**")
- 
+
     start_date = st.date_input("Start Date", datetime.now()-timedelta(days=365))
     end_date = st.date_input("End Date", datetime.now())
     rf_rate = st.number_input("Risk Free Rate (%)",0.0,20.0,DEFAULT_RF)/100
     st.info(f"Benchmark: {BENCHMARK} | Currency: {CURRENCY}")
     st.divider()
- 
+
     st.header("🔬 Model Config")
     regime_mode = st.selectbox("Regime Mode",
         ["Fixed: 4 States (Inst.)","Fixed: 2 States (Bull/Bear)","Fixed: 3 States","Auto: Best Fit (BIC)"])
     regime_val_map = {"Fixed: 4 States (Inst.)":4,"Fixed: 2 States (Bull/Bear)":2,
                       "Fixed: 3 States":3,"Auto: Best Fit (BIC)":"Auto"}
     regime_param = regime_val_map[regime_mode]
- 
+
     with st.expander("Advanced Model Sync"):
         reg_engine = st.selectbox("Engine",["Markov (High Accuracy)","GMM (Fast)"])
         reg_engine_param = "Markov" if "Markov" in reg_engine else "GMM"
@@ -1578,7 +1598,7 @@ with st.sidebar:
         trailing_stop = st.slider("Trailing Stop (%)",0.0,20.0,5.0,step=0.5)/100 if use_ts else 0.0
         use_sl = st.toggle("Hard Stop Loss",value=True)
         stop_loss = st.slider("Hard Stop (%)",0.0,30.0,8.0,step=0.5)/100 if use_sl else 0.0
- 
+
     st.divider()
     st.header("⚡ Live Mode")
     live_mode = st.toggle("Enable Live Data",value=False)
@@ -1588,7 +1608,7 @@ with st.sidebar:
             st.cache_data.clear(); st.rerun()
     else:
         data_interval = '1d'
- 
+
     st.divider()
     st.header("📥 Export")
     if not EXPORT_AVAILABLE:
@@ -1610,8 +1630,8 @@ with st.sidebar:
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e: st.error(f"Excel: {e}")
         else: st.caption("Run analysis to enable exports.")
- 
- 
+
+
 # ==========================================
 # DATA LOADING
 # ==========================================
@@ -1621,9 +1641,9 @@ if live_mode:
     df_main = load_data(TICKER, now_r-timedelta(days=lb), now_r, interval=data_interval)
 else:
     df_main = load_data(TICKER, start_date, end_date, interval='1d')
- 
+
 st.subheader("📈 Asset & Macro Analysis Suite")
- 
+
 # ==========================================
 # TABS
 # ==========================================
@@ -1636,7 +1656,7 @@ tabs = st.tabs([
 ])
 (tab0,tab1,tab2,tab3,tab4,tab5,tab6,tab7,
  tab8,tab9,tab10,tab11,tab12,tab13,tab14,tab15,tab16,tab17) = tabs
- 
+
 # Global signals
 if df_main is not None:
     st.session_state.report_gen = ReportGenerator(TICKER, start_date, end_date)
@@ -1666,10 +1686,10 @@ else:
     regime_sig="N/A"; regime_label="N/A"; regime_data={'label':'N/A','confidence':0.0}
     regime_prob=0.0; pro_detector=None; trend_diff=0.0
     vol_state="UNKNOWN"; curr_vol=0.0; jump_detected=False; sentiment_score=0; res_sum=None
- 
- 
+
+
 # Trade Intelligence module embedded inline above
- 
+
 # ==========================================
 # TAB 0: DECISION SUMMARY
 # ==========================================
@@ -1709,7 +1729,7 @@ with tab0:
         if vol_state=="HIGH": st.warning("⚠️ VOL CLUSTERING: Shocks likely to persist.")
         st.info(f"Recommendation: {regime_sig}. Target exposure: {min(1.0,0.5+0.1*sentiment_score):.0%} risk parity weight.")
     st.caption("Visit respective tabs for detailed model output.")
- 
+
 # ==========================================
 # TAB 1: VOLATILITY (GARCH)
 # ==========================================
@@ -1802,7 +1822,7 @@ with tab1:
                 else: st.success("Cash position — no leverage needed.")
     except Exception as e:
         st.error(f"Model failed: {e}")
- 
+
 # ==========================================
 # TAB 2: REGIME SWITCHING
 # ==========================================
@@ -1895,7 +1915,7 @@ with tab2:
                                     "p":res_m.pvalues.values.astype(float)},
                                    index=res_m.params.index).style.format("{:.4f}"))
         st.caption(f"AIC: {res_m.aic:.1f} | BIC: {res_m.bic:.1f}")
- 
+
 # ==========================================
 # TAB 3: STOCHASTIC MODELS
 # ==========================================
@@ -1971,7 +1991,7 @@ with tab3:
             fh2.add_trace(go.Scatter(x=fd2,y=mp2,mode='lines',line=dict(color='orange',width=3),name='Mean'))
             fh2.update_layout(title="Heston Price Paths",template="plotly_dark",height=380,hovermode="x unified")
             st.plotly_chart(fh2,use_container_width=True)
- 
+
 # ==========================================
 # TAB 4: KALMAN FILTER
 # ==========================================
@@ -2035,7 +2055,7 @@ with tab4:
                 st.write(f"Current Beta: **{beta_k[-1]:.4f}** | Z-Score: **{z_k.iloc[-1]:.2f}**")
             else:
                 st.error(f"Could not load {PAIR_TICKER}")
- 
+
 # ==========================================
 # TAB 5: MACRO
 # ==========================================
@@ -2061,7 +2081,7 @@ with tab5:
             rc=cm.loc[TICKER,'10Y Yield'] if '10Y Yield' in cm.columns else 0
             if abs(oc)>0.3: st.success(f"Energy correlation: {oc:.2f}")
             if abs(rc)>0.3: st.info(f"Rate sensitivity: {rc:.2f}")
- 
+
 # ==========================================
 # TAB 6: STRUCTURAL
 # ==========================================
@@ -2080,7 +2100,7 @@ with tab6:
         st.plotly_chart(fdc,use_container_width=True)
     else:
         st.warning("Insufficient data for selected period.")
- 
+
 # ==========================================
 # TAB 7: BACKTEST (full with all strategies + fixes)
 # ==========================================
@@ -2088,13 +2108,13 @@ with tab7:
     if df_main is None:
         st.warning("Load a ticker first."); st.stop()
     st.write("### 🛠️ Strategy Backtest (Vol-Targeted + Fixed Hurst)")
- 
+
     strat=st.radio("Strategy",[
         "Regime Switching","Kalman Trend","EMA/SMA Cross","MAD Trend Modes",
         "Dual MA Cross","Ehlers SuperSmoother","Ehlers Decycler",
         "Mean Reversion Z-Score","Relative Strength","VIX Proxy (GARCH-Fixed)",
         "Hurst Exponent (Fixed)"],horizontal=True)
- 
+
     bts=st.date_input("BT Start",datetime.now()-timedelta(days=365),key="bt_s")
     bte=st.date_input("BT End",datetime.now(),key="bt_e")
     dfbt=load_data(TICKER,bts,bte,'1d') if not live_mode else df_main
@@ -2102,7 +2122,7 @@ with tab7:
         st.error("No backtest data."); st.stop()
     pb=dfbt['Close']; rb=dfbt['Returns']
     sigs_bt=None; strat_prices=pb
- 
+
     if strat=="Regime Switching":
         b1,b2,b3=st.columns(3)
         with b1: bfq=st.selectbox("Freq",["Weekly","Daily"],key="bfq")
@@ -2141,7 +2161,7 @@ with tab7:
                 sigs_bt=vol_targeted_signal(raw_sig,gr,vt_pct)
             except: sigs_bt=raw_sig.astype(float)
         else: st.error("Regime model failed.")
- 
+
     elif strat=="Kalman Trend":
         kfn=st.select_slider("Sensitivity",[1e-5,1e-4,1e-3],value=1e-4)
         kcd=st.slider("Confirmation bars",1,5,1)
@@ -2155,20 +2175,20 @@ with tab7:
             elif pos==1 and db>=kcd: pos=0
             sl.append(pos)
         sigs_bt=pd.Series(sl,index=pb.index).astype(float)
- 
+
     elif strat=="EMA/SMA Cross":
         e1,e2=st.columns(2)
         with e1: sh=st.slider("Short EMA",5,50,20)
         with e2: lo=st.slider("Long SMA",20,200,60)
         sigs_bt=(pb.ewm(span=sh,adjust=False).mean()>=pb.rolling(lo).mean()).astype(float)
- 
+
     elif strat=="MAD Trend Modes":
         mp={}
         mp['signal_mode']=st.selectbox("Mode",["Bollinger Bands","For Loop","Combined Signal"])
         mp['bb_ma_type']=st.selectbox("MA Type",["EMA","SMA","WMA","HMA","RMA","ALMA","LSMA"])
         mp['bb_len']=st.number_input("Length",5,100,25)
         sigs_bt=MADTrendModes.get_signals(dfbt,mp).astype(float)
- 
+
     elif strat=="Dual MA Cross":
         ma_opts=["SMA","EMA","WMA","HMA","RMA","ALMA","LSMA"]
         dc1b,dc2b=st.columns(2)
@@ -2180,17 +2200,17 @@ with tab7:
             return sig.ffill().fillna(0)
         sigs_bt=stateful2((fma>sma)&(fma.shift(1)<=sma.shift(1)),
                            (fma<sma)&(fma.shift(1)>=sma.shift(1)),pb.index).astype(float)
- 
+
     elif strat=="Ehlers SuperSmoother":
         sp2=st.slider("Period",5,252,15)
         ss=EhlersFilters.super_smoother(pb,sp2)
         sigs_bt=(pb>ss).astype(float)
- 
+
     elif strat=="Ehlers Decycler":
         dp2=st.slider("Period",20,252,60)
         dc_s=EhlersFilters.simple_decycler(pb,dp2)
         sigs_bt=(pb>dc_s).astype(float)
- 
+
     elif strat=="Mean Reversion Z-Score":
         zc1,zc2,zc3=st.columns(3)
         with zc1: zlb=st.slider("Lookback",5,252,20)
@@ -2202,7 +2222,7 @@ with tab7:
             sig=pd.Series(np.nan,index=idx); sig.loc[lc]=1; sig.loc[ec]=0
             return sig.ffill().fillna(0)
         sigs_bt=stateful3(zz<-zen,zz>-zex,pb.index).astype(float)
- 
+
     elif strat=="Relative Strength":
         bt_bench=st.text_input("Benchmark","SPY",key="rs_bench")
         rs_len=st.slider("RS MA",5,200,50)
@@ -2215,7 +2235,7 @@ with tab7:
             # FIX: GARCH vol filter instead of VIX
             sigs_bt=garch_vol_filter_signal(pb,rb,raw_rs,15.0)
         else: st.error("Cannot load benchmark.")
- 
+
     elif strat=="VIX Proxy (GARCH-Fixed)":
         st.info("""
         **Fix applied**: The original strategy used ^VIX as a proxy for individual stock risk.
@@ -2226,7 +2246,7 @@ with tab7:
         gvt=st.slider("Vol Target (%)",5,30,15,key="gvt_fix")/100
         base_sig=pd.Series(1,index=pb.index)  # Always-long base
         sigs_bt=garch_vol_filter_signal(pb,rb,base_sig,gvt*100)
- 
+
     elif strat=="Hurst Exponent (Fixed)":
         st.info("""
         **Fixes applied vs original**:
@@ -2255,7 +2275,7 @@ with tab7:
                 st.plotly_chart(fhp,use_container_width=True)
             except Exception as e:
                 st.error(f"Hurst error: {e}"); sigs_bt=None
- 
+
     if sigs_bt is not None:
         btr=BacktestEngine.run_strategy(strat_prices,sigs_bt,initial_cap,trailing_stop,stop_loss)
         last_s=float(sigs_bt.iloc[-1])
@@ -2263,11 +2283,22 @@ with tab7:
         if last_s>0: st.success(f"SIGNAL: LONG (size={last_s:.0%}) | {sigs_bt.index[-1].date()}")
         else: st.error(f"SIGNAL: CASH | {sigs_bt.index[-1].date()}")
         sm=BacktestEngine.calculate_metrics(btr['returns'],rf_rate)
-        m1b,m2b,m3b,m4b=st.columns(4)
-        m1b.metric("Total Return",f"{(btr['equity_curve'].iloc[-1]/initial_cap-1)*100:.1f}%")
-        m2b.metric("Sharpe",f"{sm.get('Sharpe Ratio',0):.2f}")
-        m3b.metric("Max DD",f"{sm.get('Max Drawdown',0)*100:.1f}%")
-        m4b.metric("B&H Return",f"{(btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100:.1f}%")
+        bm_sm=BacktestEngine.calculate_metrics(strat_prices.pct_change().dropna(),rf_rate)
+        strat_total = (btr['equity_curve'].iloc[-1]/initial_cap-1)*100
+        bh_total = (btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100
+        alpha = strat_total - bh_total
+        m1b,m2b,m3b,m4b,m5b,m6b=st.columns(6)
+        m1b.metric("Strategy Return", f"{strat_total:.1f}%",
+                   delta=f"{alpha:+.1f}% vs B&H",
+                   delta_color="normal" if alpha >= 0 else "inverse")
+        m2b.metric("B&H Return", f"{bh_total:.1f}%")
+        m3b.metric("Sharpe",f"{sm.get('Sharpe Ratio',0):.2f}",
+                   delta=f"B&H: {bm_sm.get('Sharpe Ratio',0):.2f}")
+        m4b.metric("Sortino",f"{sm.get('Sortino Ratio',0):.2f}")
+        m5b.metric("Max DD",f"{sm.get('Max Drawdown',0)*100:.1f}%",
+                   delta=f"B&H DD: {bm_sm.get('Max Drawdown',0)*100:.1f}%",
+                   delta_color="inverse")
+        m6b.metric("CAGR",f"{sm.get('CAGR',0)*100:.1f}%")
         fbt=go.Figure()
         fbt.add_trace(go.Scatter(x=btr['equity_curve'].index,y=btr['equity_curve'],
                                   mode='lines',line=dict(color='#00f2ff',width=2),name='Strategy'))
@@ -2277,13 +2308,43 @@ with tab7:
         st.plotly_chart(fbt,use_container_width=True)
         if st.session_state.report_gen: st.session_state.report_gen.add_plot("Backtest",fbt)
         if not btr['trades'].empty:
-            td=btr['trades'].copy()
+            td = btr['trades'].copy()
             for dc in ['Entry Date','Exit Date']:
                 if dc in td.columns:
-                    td[dc]=pd.to_datetime(td[dc]).apply(lambda x:x.date() if pd.notnull(x) else "Open")
-            st.dataframe(td.style.format({"Buy Price":"{:.2f}","Sell Price":"{:.2f}","PnL (%)":"{:.2f}%"}),
-                         use_container_width=True)
- 
+                    td[dc] = pd.to_datetime(td[dc]).apply(lambda x: x.date() if pd.notnull(x) else "Open")
+            # Add Strategy Portfolio Return % = PnL($) / initial_capital
+            if 'PnL ($)' in td.columns:
+                td['Portfolio Impact %'] = (td['PnL ($)'] / initial_cap * 100).round(2)
+            # Colour-code rows: green = profit, red = loss
+            def colour_row(row):
+                pnl = row.get('PnL (%)', 0)
+                if pnl is None: pnl = 0
+                try: pnl = float(pnl)
+                except: pnl = 0
+                color = 'background-color: #1a3a1a' if pnl > 0 else 'background-color: #3a1a1a' if pnl < 0 else ''
+                return [color] * len(row)
+            fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (%)": "{:.2f}%"}
+            if 'PnL ($)' in td.columns:
+                fmt['PnL ($)'] = "${:.2f}"
+            if 'Portfolio Impact %' in td.columns:
+                fmt['Portfolio Impact %'] = "{:.2f}%"
+            st.dataframe(
+                td.style.apply(colour_row, axis=1).format(fmt, na_rep="-"),
+                use_container_width=True
+            )
+            # Summary stats
+            closed = td[td['Status'] != 'Open']
+            if len(closed) > 0:
+                wins = closed[closed['PnL (%)'] > 0]
+                losses = closed[closed['PnL (%)'] <= 0]
+                sl1, sl2, sl3, sl4 = st.columns(4)
+                sl1.metric("Closed Trades", len(closed))
+                sl2.metric("Win Rate", f"{len(wins)/len(closed)*100:.0f}%" if len(closed) > 0 else "N/A")
+                sl3.metric("Avg Win", f"{wins['PnL (%)'].mean():.2f}%" if len(wins) > 0 else "N/A")
+                sl4.metric("Avg Loss", f"{losses['PnL (%)'].mean():.2f}%" if len(losses) > 0 else "N/A")
+        else:
+            st.info("No closed trades generated by the strategy.")
+
 # ==========================================
 # TAB 8: VOL CLUSTERING
 # ==========================================
@@ -2318,7 +2379,7 @@ with tab8:
     fvc.add_hline(y=float(sq.mean()+2*sq.std()),line_dash="dash",line_color="red",row=2,col=1)
     fvc.update_layout(height=500,template="plotly_dark",hovermode="x unified")
     st.plotly_chart(fvc,use_container_width=True)
- 
+
 # ==========================================
 # TAB 9: ADVANCED REGIME
 # ==========================================
@@ -2340,7 +2401,7 @@ with tab9:
                                           stackgroup='one',name=lbls9[i]))
             fp9.update_layout(title="Multi-Factor Regime Probabilities",template="plotly_dark",height=350)
             st.plotly_chart(fp9,use_container_width=True)
- 
+
 # ==========================================
 # TAB 10: SML & ALPHA
 # ==========================================
@@ -2374,14 +2435,14 @@ with tab10:
                 fd_sml.update_layout(height=500,template="plotly_dark")
                 st.plotly_chart(fd_sml,use_container_width=True)
             else: st.error("Cannot load benchmark.")
- 
+
 # ==========================================
 # TAB 11: IV SCANNER (inline)
 # ==========================================
 with tab11:
     st.write("### 🔍 Institutional IV Scanner")
     st.markdown("Options-based stock selection: identifies institutional accumulation via IV dynamics.")
- 
+
     @st.cache_data(ttl=300,show_spinner=False)
     def quick_iv(ticker):
         try:
@@ -2432,7 +2493,7 @@ with tab11:
                     'iv_rank':round(ivr,0),'hv_30':round(hv30,1),'iv_hv':round(iv_hv,2),
                     'pc_ratio':round(pc,2),'score':round(score,1),'verdict':verdict}
         except: return None
- 
+
     iv_single=st.text_input("Single Ticker IV Analysis",TICKER,key="iv_single").upper()
     if st.button("Analyze IV",key="iv_btn"):
         with st.spinner("Fetching options..."):
@@ -2447,7 +2508,7 @@ with tab11:
             vc={"STRONG BUY":"#00ff88","BUY":"#44cc66","WATCH":"#ffcc00","NEUTRAL":"#aaa","AVOID":"#ff4444"}
             st.markdown(f"<div style='background:{vc.get(ir['verdict'],'#333')}22;border:2px solid {vc.get(ir['verdict'],'#888')};border-radius:10px;padding:16px;text-align:center;'><h2 style='color:{vc.get(ir['verdict'],'white')};margin:0'>{ir['verdict']}</h2><p>Score: {ir['score']:.1f}/6</p></div>",unsafe_allow_html=True)
         else: st.error("No options data available.")
- 
+
     st.divider()
     st.write("#### Bulk IV Scan")
     iv_uni=st.selectbox("Universe",["S&P 500","NASDAQ 100","Custom"],key="iv_uni")
@@ -2483,7 +2544,7 @@ with tab11:
                          use_container_width=True)
             st.download_button("Download CSV",ivdf.to_csv(index=False),
                                 f"iv_scan_{datetime.now().strftime('%Y%m%d')}.csv","text/csv")
- 
+
 # ==========================================
 # TAB 12: MARKET SCAN
 # ==========================================
@@ -2524,7 +2585,7 @@ with tab12:
         with c2s:
             st.subheader(f"🛑 CASH ({len(sc_cash)})")
             if sc_cash: st.dataframe(pd.DataFrame(sc_cash).sort_values('Score'),use_container_width=True)
- 
+
 # ==========================================
 # TAB 13: FED BALANCE SHEET
 # ==========================================
@@ -2561,7 +2622,7 @@ with tab13:
             fl.add_trace(go.Scatter(x=ldf2.index,y=ldf2[col]/1e3,mode='lines',stackgroup='one',name=col))
         fl.update_layout(title="FED Liabilities",yaxis_title="Billions $",template="plotly_dark",height=400)
         st.plotly_chart(fl,use_container_width=True)
- 
+
 # ==========================================
 # TAB 14: OPTIONS IV SURFACE
 # ==========================================
@@ -2598,7 +2659,7 @@ with tab14:
                 st.plotly_chart(f3d,use_container_width=True)
             else: st.warning("Insufficient liquid options data.")
         except Exception as e: st.error(f"Options error: {e}")
- 
+
 # ==========================================
 # TAB 15: HURST EXPONENT
 # ==========================================
@@ -2630,13 +2691,13 @@ with tab15:
             st.metric("Current H",f"{last_h:.3f}",
                        delta="TRENDING" if last_h>hth else "MEAN REVERTING" if last_h<1-hth else "RANDOM WALK")
         except Exception as e: st.error(f"Hurst error: {e}")
- 
+
 # ==========================================
 # TAB 16: HOT 10 + TRADE INTELLIGENCE
 # ==========================================
 with tab16:
     hot_tabs=st.tabs(["🔥 Hot 10 (Daily Momentum)","🎯 Trade Intelligence"])
- 
+
     with hot_tabs[0]:
         st.write("### 🔥 Daily Top 10 (Institutional Hot List)")
         hc1,hc2,hc3=st.columns(3)
@@ -2712,10 +2773,10 @@ with tab16:
                                 subset=['Daily%','VIX Multiple'],cmap='YlOrRd'),use_container_width=True)
                         else: st.error("No setups passed institutional verification today.")
                     else: st.warning("No stocks cleared the momentum threshold today.")
- 
+
     with hot_tabs[1]:
         st.info("👆 Use the dedicated **🏆 Trade Intelligence** tab for full 7-layer analysis.")
- 
+
 # ==========================================
 # TAB 17: TRADE INTELLIGENCE (7-Layer System)
 # ==========================================
@@ -2737,7 +2798,7 @@ with tab17:
     """)
     default_ti_ticker = TICKER if df_main is not None else "AAPL"
     render_trade_intelligence(default_ti_ticker)
- 
+
 # ── FOOTER ────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.caption("Unified Quant Suite | GARCH · Markov · Kalman · Heston · IV Scanner · 🏆 Trade Intelligence")
