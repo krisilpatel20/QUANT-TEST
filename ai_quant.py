@@ -2300,9 +2300,9 @@ with tab7:
         with met_col1:
             st.metric("Total Return (Strategy)", f"{(btr['equity_curve'].iloc[-1]/initial_cap - 1)*100:.2f}%")
         with met_col2:
-            st.metric("Sharpe Ratio", f"{strat_metrics.get('Sharpe Ratio', 0):.2f}")
+            st.metric("Sharpe Ratio", f"{sm.get('Sharpe Ratio', 0):.2f}")
         with met_col3:
-            st.metric("Max Drawdown", f"{strat_metrics.get('Max Drawdown', 0)*100:.2f}%")
+            st.metric("Max Drawdown", f"{sm.get('Max Drawdown', 0)*100:.2f}%")
         with met_col4:
             st.metric("Benchmark Return", f"{(btr['benchmark_curve'].iloc[-1]/initial_cap - 1)*100:.2f}%")
         fbt=go.Figure()
