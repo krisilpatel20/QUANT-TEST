@@ -2123,6 +2123,7 @@ with tab7:
     st.write("### 🛠️ Strategy Backtest (Vol-Targeted + Fixed Hurst)")
 
     strat=st.radio("Strategy",[
+        "🏆 Regime-Aware Sizing (Beat B&H)",
         "Regime Switching","Kalman Trend","EMA/SMA Cross","MAD Trend Modes",
         "Dual MA Cross","Ehlers SuperSmoother","Ehlers Decycler",
         "Mean Reversion Z-Score","Relative Strength","VIX Proxy (GARCH-Fixed)",
@@ -2136,7 +2137,92 @@ with tab7:
     pb=dfbt['Close']; rb=dfbt['Returns']
     sigs_bt=None; strat_prices=pb
 
-    if strat=="Regime Switching":
+    if strat=="🏆 Regime-Aware Sizing (Beat B&H)":
+        st.markdown("""
+        ### 🏆 Regime-Aware Position Sizing
+        **The key insight**: stop losses hurt you because they compound losses on a shrinking base,
+        then the big move runs on depleted capital. The fix:
+        - **High regime conviction (prob > 0.75)** → full 100% position
+        - **Medium conviction (0.5–0.75)** → 50% position
+        - **Low conviction / transition (<0.5)** → 20% position (stay exposed, avoid missing the run)
+        - **Bear regime dominant** → 0% (cash only)
+        - **No hard stop loss** — the regime IS your stop. Exit when regime flips, not on price noise.
+        """)
+
+        ra_c1, ra_c2, ra_c3 = st.columns(3)
+        with ra_c1:
+            ra_n = st.slider("Regimes", 2, 4, 2, key="ra_n")
+            ra_stab = st.slider("Smoothing", 0, 10, 3, key="ra_stab")
+        with ra_c2:
+            ra_high = st.slider("High conviction threshold", 0.5, 0.95, 0.75, step=0.05, key="ra_high")
+            ra_med = st.slider("Medium conviction threshold", 0.3, 0.7, 0.50, step=0.05, key="ra_med")
+        with ra_c3:
+            ra_size_high = st.slider("Full size (%)", 50, 100, 100, key="ra_sh") / 100
+            ra_size_med = st.slider("Medium size (%)", 10, 80, 50, key="ra_sm") / 100
+            ra_size_low = st.slider("Low size (%)", 0, 40, 20, key="ra_sl") / 100
+
+        # Prepare data
+        md_ra = rb.dropna() * 100
+        if ra_stab > 0:
+            md_ra = md_ra.ewm(span=ra_stab, adjust=False).mean()
+        md_ra = pd.Series(md_ra.values.flatten().astype(float), index=md_ra.index)
+
+        with st.spinner("Fitting Markov regime model..."):
+            res_ra = fit_regime_model(md_ra, ra_n, True, True)
+
+        if res_ra is None:
+            st.error("Model failed."); sigs_bt = None
+        else:
+            p_df = res_ra.filtered_marginal_probabilities
+
+            # Identify bull and bear regimes by mean return
+            r_means = []
+            for i in range(ra_n):
+                m = res_ra.params[f'const[{i}]'] if f'const[{i}]' in res_ra.params                     else res_ra.params.get('const', 0.0)
+                r_means.append((i, float(m)))
+            bull_idx = sorted(r_means, key=lambda x: x[1], reverse=True)[0][0]
+            bear_idx = sorted(r_means, key=lambda x: x[1])[0][0]
+
+            # Build fractional signal based on bull regime probability
+            bull_prob = p_df.iloc[:, bull_idx]
+            bear_prob = p_df.iloc[:, bear_idx]
+
+            def regime_size(bp, bear_p):
+                if bear_p > 0.5:          return 0.0   # bear dominant → cash
+                if bp >= ra_high:          return ra_size_high  # high conviction bull
+                if bp >= ra_med:           return ra_size_med   # medium conviction
+                return ra_size_low                        # uncertain → small exposure
+
+            raw_size = pd.Series(
+                [regime_size(bp, brp) for bp, brp in zip(bull_prob, bear_prob)],
+                index=p_df.index
+            )
+            # Smooth the signal to avoid rapid resizing
+            sigs_bt = raw_size.rolling(3, min_periods=1).mean()
+            sigs_bt = sigs_bt.reindex(pb.index, method='ffill').fillna(0)
+            strat_prices = pb
+
+            # Visualise
+            with st.expander("Strategy Context", expanded=True):
+                fig_ra = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+                                       subplot_titles=("Price", "Bull Regime Probability", "Position Size (% of Capital)"))
+                fig_ra.add_trace(go.Scatter(x=pb.index, y=pb, mode='lines',
+                                             line=dict(color='gray'), name='Price'), row=1, col=1)
+                fig_ra.add_trace(go.Scatter(x=bull_prob.index, y=bull_prob,
+                                             mode='lines', line=dict(color='#00ff88', width=2),
+                                             name='Bull Prob'), row=2, col=1)
+                fig_ra.add_hline(y=ra_high, line_dash="dash", line_color="green",
+                                  annotation_text=f"Full size ({ra_high:.0%})", row=2, col=1)
+                fig_ra.add_hline(y=ra_med, line_dash="dash", line_color="orange",
+                                  annotation_text=f"Med size ({ra_med:.0%})", row=2, col=1)
+                fig_ra.add_trace(go.Scatter(x=sigs_bt.index, y=sigs_bt * 100,
+                                             mode='lines', line=dict(color='#00f2ff', width=2),
+                                             fill='tozeroy', name='Position Size %'), row=3, col=1)
+                fig_ra.update_yaxes(range=[0, 105], row=3, col=1)
+                fig_ra.update_layout(height=650, template="plotly_dark", hovermode="x unified")
+                st.plotly_chart(fig_ra, use_container_width=True)
+
+    elif strat=="Regime Switching":
         b1,b2,b3=st.columns(3)
         with b1: bfq=st.selectbox("Freq",["Weekly","Daily"],key="bfq")
         with b2: bnr=st.slider("Regimes",2,4,2,key="bnr")
@@ -2321,11 +2407,25 @@ with tab7:
             trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date']).dt.date
             trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date']).apply(
                 lambda x: x.date() if pd.notnull(x) else "Open")
+            # Running equity column — shows compounding so user understands
+            # why 1733% last trade != 1733% total (prior losses compound down the base)
+            running = initial_cap
+            eq_after = []
+            for _, row in trades_df.iterrows():
+                running = running * (1 + row['PnL (%)'] / 100)
+                eq_after.append(round(running, 2))
+            trades_df['Equity After ($)'] = eq_after
             st.dataframe(trades_df.style.format({
                 "Buy Price": "{:.2f}",
                 "Sell Price": "{:.2f}",
-                "PnL (%)": "{:.2f}%"
+                "PnL (%)": "{:.2f}%",
+                "Equity After ($)": "{:,.2f}"
             }), use_container_width=True)
+            st.caption(
+                f"PnL(%) = return on that specific trade. "
+                f"Equity After shows running capital — compounding losses shrink the base, "
+                f"so a 1733% trade on a depleted base gives a lower total portfolio return."
+            )
         else:
             st.info("No closed trades generated by the strategy.")
 
