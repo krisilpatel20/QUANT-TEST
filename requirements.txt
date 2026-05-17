@@ -1,0 +1,12 @@
+streamlit
+yfinance
+pandas
+numpy
+matplotlib
+scipy
+statsmodels
+arch
+fpdf2
+xlsxwriter
+plotly
+scikit-learn
