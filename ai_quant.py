@@ -2139,88 +2139,124 @@ with tab7:
 
     if strat=="🏆 Regime-Aware Sizing (Beat B&H)":
         st.markdown("""
-        ### 🏆 Regime-Aware Position Sizing
-        **The key insight**: stop losses hurt you because they compound losses on a shrinking base,
-        then the big move runs on depleted capital. The fix:
-        - **High regime conviction (prob > 0.75)** → full 100% position
-        - **Medium conviction (0.5–0.75)** → 50% position
-        - **Low conviction / transition (<0.5)** → 20% position (stay exposed, avoid missing the run)
-        - **Bear regime dominant** → 0% (cash only)
-        - **No hard stop loss** — the regime IS your stop. Exit when regime flips, not on price noise.
+        ### 🏆 Regime-Aware Strategy (Designed to Beat B&H)
+        **Core principle**: fractional sizing always underperforms B&H on uptrending stocks.
+        The ONLY edge over B&H comes from **avoiding confirmed bear regimes** while staying
+        fully invested in every bull and uncertain regime.
+
+        - **Not bear regime** → **100% long** (never miss a bull move)
+        - **Bear regime confirmed** → **100% cash** (avoid the real drawdowns)
+        - No stop losses — regime is the only exit signal
+        - No partial sizes — they always dilute returns vs B&H
         """)
 
-        ra_c1, ra_c2, ra_c3 = st.columns(3)
+        ra_c1, ra_c2 = st.columns(2)
         with ra_c1:
-            ra_n = st.slider("Regimes", 2, 4, 2, key="ra_n")
-            ra_stab = st.slider("Smoothing", 0, 10, 3, key="ra_stab")
+            ra_n = st.slider("Number of Regimes", 2, 4, 2, key="ra_n")
+            ra_stab = st.slider("Signal Smoothing", 0, 10, 3, key="ra_stab")
+            ra_freq = st.selectbox("Frequency", ["Weekly", "Daily"], index=0, key="ra_freq")
         with ra_c2:
-            ra_high = st.slider("High conviction threshold", 0.5, 0.95, 0.75, step=0.05, key="ra_high")
-            ra_med = st.slider("Medium conviction threshold", 0.3, 0.7, 0.50, step=0.05, key="ra_med")
-        with ra_c3:
-            ra_size_high = st.slider("Full size (%)", 50, 100, 100, key="ra_sh") / 100
-            ra_size_med = st.slider("Medium size (%)", 10, 80, 50, key="ra_sm") / 100
-            ra_size_low = st.slider("Low size (%)", 0, 40, 20, key="ra_sl") / 100
+            ra_bear_thresh = st.slider("Bear confirmation threshold", 0.40, 0.85, 0.55,
+                                        step=0.05, key="ra_bear",
+                                        help="Bear probability must exceed this to exit. Higher = less sensitive = fewer exits.")
+            ra_reentry = st.slider("Re-entry threshold (bull prob >)", 0.30, 0.80, 0.45,
+                                    step=0.05, key="ra_re",
+                                    help="Re-enter when bull prob recovers above this. Lower = faster re-entry.")
+            ra_confirm = st.slider("Confirmation bars", 1, 5, 2, key="ra_confirm",
+                                    help="Bear must persist N bars before exiting. Prevents false signals.")
 
         # Prepare data
-        md_ra = rb.dropna() * 100
+        if ra_freq == "Weekly":
+            pb_ra = pb.resample('W').last().dropna()
+            rb_ra = pb_ra.pct_change().dropna()
+        else:
+            pb_ra = pb; rb_ra = rb
+
+        md_ra = rb_ra.dropna() * 100
         if ra_stab > 0:
             md_ra = md_ra.ewm(span=ra_stab, adjust=False).mean()
         md_ra = pd.Series(md_ra.values.flatten().astype(float), index=md_ra.index)
+        strat_prices = pb_ra
 
-        with st.spinner("Fitting Markov regime model..."):
-            res_ra = fit_regime_model(md_ra, ra_n, True, True)
-
-        if res_ra is None:
-            st.error("Model failed."); sigs_bt = None
+        if len(md_ra) < 15:
+            st.error("Not enough data points."); sigs_bt = None
         else:
-            p_df = res_ra.filtered_marginal_probabilities
+            with st.spinner("Fitting Markov regime model..."):
+                res_ra = fit_regime_model(md_ra, ra_n, True, True)
 
-            # Identify bull and bear regimes by mean return
-            r_means = []
-            for i in range(ra_n):
-                m = res_ra.params[f'const[{i}]'] if f'const[{i}]' in res_ra.params                     else res_ra.params.get('const', 0.0)
-                r_means.append((i, float(m)))
-            bull_idx = sorted(r_means, key=lambda x: x[1], reverse=True)[0][0]
-            bear_idx = sorted(r_means, key=lambda x: x[1])[0][0]
+            if res_ra is None:
+                st.error("Model failed."); sigs_bt = None
+            else:
+                p_df = res_ra.filtered_marginal_probabilities
 
-            # Build fractional signal based on bull regime probability
-            bull_prob = p_df.iloc[:, bull_idx]
-            bear_prob = p_df.iloc[:, bear_idx]
+                # Identify bear regime (lowest mean return)
+                r_means = []
+                for i in range(ra_n):
+                    m = res_ra.params[f'const[{i}]'] if f'const[{i}]' in res_ra.params                         else res_ra.params.get('const', 0.0)
+                    r_means.append((i, float(m)))
+                bull_idx = sorted(r_means, key=lambda x: x[1], reverse=True)[0][0]
+                bear_idx = sorted(r_means, key=lambda x: x[1])[0][0]
 
-            def regime_size(bp, bear_p):
-                if bear_p > 0.5:          return 0.0   # bear dominant → cash
-                if bp >= ra_high:          return ra_size_high  # high conviction bull
-                if bp >= ra_med:           return ra_size_med   # medium conviction
-                return ra_size_low                        # uncertain → small exposure
+                bear_prob = p_df.iloc[:, bear_idx]
+                bull_prob = p_df.iloc[:, bull_idx]
 
-            raw_size = pd.Series(
-                [regime_size(bp, brp) for bp, brp in zip(bull_prob, bear_prob)],
-                index=p_df.index
-            )
-            # Smooth the signal to avoid rapid resizing
-            sigs_bt = raw_size.rolling(3, min_periods=1).mean()
-            sigs_bt = sigs_bt.reindex(pb.index, method='ffill').fillna(0)
-            strat_prices = pb
+                # Stateful signal: only exit when bear confirmed for N bars
+                # Re-enter as soon as bear recedes below re-entry threshold
+                raw_bear = (bear_prob > ra_bear_thresh).astype(int)
+                confirmed_bear = raw_bear.rolling(ra_confirm).min().fillna(0)
 
-            # Visualise
-            with st.expander("Strategy Context", expanded=True):
-                fig_ra = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                                       subplot_titles=("Price", "Bull Regime Probability", "Position Size (% of Capital)"))
-                fig_ra.add_trace(go.Scatter(x=pb.index, y=pb, mode='lines',
-                                             line=dict(color='gray'), name='Price'), row=1, col=1)
-                fig_ra.add_trace(go.Scatter(x=bull_prob.index, y=bull_prob,
-                                             mode='lines', line=dict(color='#00ff88', width=2),
-                                             name='Bull Prob'), row=2, col=1)
-                fig_ra.add_hline(y=ra_high, line_dash="dash", line_color="green",
-                                  annotation_text=f"Full size ({ra_high:.0%})", row=2, col=1)
-                fig_ra.add_hline(y=ra_med, line_dash="dash", line_color="orange",
-                                  annotation_text=f"Med size ({ra_med:.0%})", row=2, col=1)
-                fig_ra.add_trace(go.Scatter(x=sigs_bt.index, y=sigs_bt * 100,
-                                             mode='lines', line=dict(color='#00f2ff', width=2),
-                                             fill='tozeroy', name='Position Size %'), row=3, col=1)
-                fig_ra.update_yaxes(range=[0, 105], row=3, col=1)
-                fig_ra.update_layout(height=650, template="plotly_dark", hovermode="x unified")
-                st.plotly_chart(fig_ra, use_container_width=True)
+                # Signal: 1 = long, 0 = cash
+                # In bear: cash. Otherwise: fully long.
+                sigs_raw = (confirmed_bear < 1).astype(float)
+
+                # Also re-enter when bull prob recovers (handles transition regimes)
+                in_cash = False
+                sig_list = []
+                for i in range(len(sigs_raw)):
+                    bp = float(bull_prob.iloc[i])
+                    cb = float(confirmed_bear.iloc[i])
+                    if not in_cash:
+                        if cb == 1:  # bear confirmed → exit
+                            in_cash = True
+                        sig_list.append(0.0 if in_cash else 1.0)
+                    else:
+                        if bp > ra_reentry:  # bull recovering → re-enter
+                            in_cash = False
+                        sig_list.append(0.0 if in_cash else 1.0)
+
+                sigs_bt = pd.Series(sig_list, index=p_df.index)
+                sigs_bt = sigs_bt.reindex(pb_ra.index, method='ffill').fillna(1.0)
+
+                # Show how much time in market
+                pct_invested = sigs_bt.mean() * 100
+                days_in = sigs_bt.sum()
+                st.info(f"Time in market: **{pct_invested:.1f}%** of period ({int(days_in)} of {len(sigs_bt)} bars). "
+                        f"Each bar out of market = capital preserved during bear regime.")
+
+                with st.expander("Strategy Context", expanded=True):
+                    fig_ra = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                                           subplot_titles=("Price (green=invested, red=cash)",
+                                                           "Bear Regime Probability",
+                                                           "Signal (1=Long, 0=Cash)"))
+                    fig_ra.add_trace(go.Scatter(x=pb_ra.index, y=pb_ra, mode='lines',
+                                                 line=dict(color='gray', width=1), name='Price'), row=1, col=1)
+                    # Shade cash periods red
+                    cash_mask = sigs_bt == 0
+                    highlight_plotly_zones(fig_ra, cash_mask.reindex(pb_ra.index).fillna(False),
+                                           'red', opacity=0.2, row=1, col=1)
+                    fig_ra.add_trace(go.Scatter(x=bear_prob.index, y=bear_prob,
+                                                 mode='lines', line=dict(color='#ff4444', width=2),
+                                                 name='Bear Prob'), row=2, col=1)
+                    fig_ra.add_hline(y=ra_bear_thresh, line_dash="dash", line_color="red",
+                                      annotation_text=f"Exit threshold ({ra_bear_thresh:.0%})", row=2, col=1)
+                    fig_ra.add_trace(go.Scatter(x=sigs_bt.index, y=sigs_bt,
+                                                 mode='lines', line=dict(color='#00f2ff', width=2),
+                                                 fill='tozeroy', name='Signal'), row=3, col=1)
+                    fig_ra.update_layout(height=650, template="plotly_dark", hovermode="x unified")
+                    st.plotly_chart(fig_ra, use_container_width=True)
+
+                st.caption(f"AIC: {res_ra.aic:.1f} | BIC: {res_ra.bic:.1f} | "
+                            f"Bear regime = Regime {bear_idx} (lowest mean return)")
 
     elif strat=="Regime Switching":
         b1,b2,b3=st.columns(3)
