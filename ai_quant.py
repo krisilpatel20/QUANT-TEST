@@ -559,7 +559,7 @@ class BacktestEngine:
         equity_curve = [initial_capital]
         trades = []; position = 0; entry_price = 0; entry_date = None
         max_price = 0; cash = initial_capital; holdings = 0
-        cooldown = 0; prev_sig = 0.0
+        cooldown = 0; prev_sig = 0.0; position_size_pct = 1.0
 
         for date, price, signal in zip(prices.index, prices, signals):
             signal = float(signal)
@@ -585,6 +585,7 @@ class BacktestEngine:
                     pnl_pct = (pnl_dollar / cost_basis_stop * 100) if cost_basis_stop > 0 else 0
                     trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                    'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
+                                   'Size (%)':round(position_size_pct*100,1),
                                    'PnL (%)':round(pnl_pct,2),
                                    'PnL ($)':round(pnl_dollar,2),
                                    'Status':smsg})
@@ -592,6 +593,7 @@ class BacktestEngine:
 
             if position == 0 and signal > 0 and cooldown == 0:
                 position = 1; entry_price = price; entry_date = date; max_price = price
+                position_size_pct = float(signal)  # fraction of capital invested
                 invest = cash * signal; holdings = invest/price; cash -= invest
             elif position == 1 and signal == 0:
                 position = 0
@@ -603,6 +605,7 @@ class BacktestEngine:
                 holdings = 0
                 trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
                                'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
+                               'Size (%)':round(position_size_pct*100,1),
                                'PnL (%)':round(pnl_pct,2),
                                'PnL ($)':round(pnl_dollar,2),
                                'Status':'Closed'})
@@ -620,6 +623,7 @@ class BacktestEngine:
             pnl_pct = (pnl_dollar / cost_basis * 100) if cost_basis > 0 else 0
             trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':None,
                            'Buy Price':round(entry_price,2),'Sell Price':round(cp,2),
+                           'Size (%)':round(position_size_pct*100,1),
                            'PnL (%)':round(pnl_pct,2),
                            'PnL ($)':round(pnl_dollar,2),
                            'Status':'Open'})
@@ -2283,11 +2287,20 @@ with tab7:
         if last_s>0: st.success(f"SIGNAL: LONG (size={last_s:.0%}) | {sigs_bt.index[-1].date()}")
         else: st.error(f"SIGNAL: CASH | {sigs_bt.index[-1].date()}")
         sm=BacktestEngine.calculate_metrics(btr['returns'],rf_rate)
+        strat_ret = (btr['equity_curve'].iloc[-1]/initial_cap-1)*100
+        bh_ret = (btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100
+        total_pnl_dollar = btr['equity_curve'].iloc[-1] - initial_cap
         met_col1,met_col2,met_col3,met_col4=st.columns(4)
-        met_col1.metric("Total Return (Strategy)",f"{(btr['equity_curve'].iloc[-1]/initial_cap-1)*100:.2f}%")
+        met_col1.metric("Portfolio Return (Strategy)",
+                        f"{strat_ret:.2f}%",
+                        delta=f"{CURRENCY}{total_pnl_dollar:+,.0f} on {CURRENCY}{initial_cap:,.0f}")
         met_col2.metric("Sharpe Ratio",f"{sm.get('Sharpe Ratio',0):.2f}")
         met_col3.metric("Max Drawdown",f"{sm.get('Max Drawdown',0)*100:.2f}%")
-        met_col4.metric("Benchmark Return",f"{(btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100:.2f}%")
+        met_col4.metric("Benchmark Return (B&H)",f"{bh_ret:.2f}%",
+                        delta=f"{strat_ret-bh_ret:+.2f}% vs strategy",
+                        delta_color="off")
+        st.caption("ℹ️ Portfolio Return = total equity growth. Trade PnL(%) = return on capital deployed in that specific trade. "
+                   "If position Size(%) < 100%, portfolio return will be lower than trade return — this is correct vol-targeted behaviour.")
         fbt=go.Figure()
         fbt.add_trace(go.Scatter(x=btr['equity_curve'].index,y=btr['equity_curve'],
                                   mode='lines',line=dict(color='#00f2ff',width=2),name='Strategy'))
@@ -2302,6 +2315,8 @@ with tab7:
                 if dc in td.columns:
                     td[dc] = pd.to_datetime(td[dc]).apply(lambda x: x.date() if pd.notnull(x) else "Open")
             fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (%)": "{:.2f}%"}
+            if 'Size (%)' in td.columns:
+                fmt['Size (%)'] = "{:.1f}%"
             if 'PnL ($)' in td.columns:
                 fmt['PnL ($)'] = "${:.2f}"
             st.dataframe(td.style.format(fmt), use_container_width=True)
