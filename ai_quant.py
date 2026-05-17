@@ -580,12 +580,12 @@ class BacktestEngine:
                     exit_val = holdings * price
                     cash = cash + exit_val          # preserve any uninvested cash
                     holdings = 0
-                    pnl = (price - entry_price) / entry_price
-                    cost_basis_stop = (exit_val / price) * entry_price   # approx shares * entry
+                    cost_basis_stop = holdings * entry_price
                     pnl_dollar = exit_val - cost_basis_stop
+                    pnl_pct = (pnl_dollar / cost_basis_stop * 100) if cost_basis_stop > 0 else 0
                     trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
-                                   'Buy Price':entry_price,'Sell Price':price,
-                                   'PnL (%)':round(pnl*100,2),
+                                   'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
+                                   'PnL (%)':round(pnl_pct,2),
                                    'PnL ($)':round(pnl_dollar,2),
                                    'Status':smsg})
                     equity_curve.append(cash); cooldown = 5; prev_sig = 0.0; continue
@@ -597,13 +597,13 @@ class BacktestEngine:
                 position = 0
                 exit_val = holdings * price
                 cash += exit_val
-                pnl = (price - entry_price) / entry_price
                 cost_basis = holdings * entry_price
                 pnl_dollar = exit_val - cost_basis
+                pnl_pct = (pnl_dollar / cost_basis * 100) if cost_basis > 0 else 0
                 holdings = 0
                 trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
-                               'Buy Price':entry_price,'Sell Price':price,
-                               'PnL (%)':round(pnl*100,2),
+                               'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
+                               'PnL (%)':round(pnl_pct,2),
                                'PnL ($)':round(pnl_dollar,2),
                                'Status':'Closed'})
             elif position == 1 and signal != prev_sig and signal > 0:
@@ -614,13 +614,13 @@ class BacktestEngine:
 
         if position == 1:
             cp = prices.iloc[-1]
-            pnl = (cp - entry_price) / entry_price
             open_val = holdings * cp
             cost_basis = holdings * entry_price
             pnl_dollar = open_val - cost_basis
+            pnl_pct = (pnl_dollar / cost_basis * 100) if cost_basis > 0 else 0
             trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':None,
-                           'Buy Price':entry_price,'Sell Price':cp,
-                           'PnL (%)':round(pnl*100,2),
+                           'Buy Price':round(entry_price,2),'Sell Price':round(cp,2),
+                           'PnL (%)':round(pnl_pct,2),
                            'PnL ($)':round(pnl_dollar,2),
                            'Status':'Open'})
             equity_curve[-1] = cash + holdings*cp
@@ -2283,22 +2283,11 @@ with tab7:
         if last_s>0: st.success(f"SIGNAL: LONG (size={last_s:.0%}) | {sigs_bt.index[-1].date()}")
         else: st.error(f"SIGNAL: CASH | {sigs_bt.index[-1].date()}")
         sm=BacktestEngine.calculate_metrics(btr['returns'],rf_rate)
-        bm_sm=BacktestEngine.calculate_metrics(strat_prices.pct_change().dropna(),rf_rate)
-        strat_total = (btr['equity_curve'].iloc[-1]/initial_cap-1)*100
-        bh_total = (btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100
-        alpha = strat_total - bh_total
-        m1b,m2b,m3b,m4b,m5b,m6b=st.columns(6)
-        m1b.metric("Strategy Return", f"{strat_total:.1f}%",
-                   delta=f"{alpha:+.1f}% vs B&H",
-                   delta_color="normal" if alpha >= 0 else "inverse")
-        m2b.metric("B&H Return", f"{bh_total:.1f}%")
-        m3b.metric("Sharpe",f"{sm.get('Sharpe Ratio',0):.2f}",
-                   delta=f"B&H: {bm_sm.get('Sharpe Ratio',0):.2f}")
-        m4b.metric("Sortino",f"{sm.get('Sortino Ratio',0):.2f}")
-        m5b.metric("Max DD",f"{sm.get('Max Drawdown',0)*100:.1f}%",
-                   delta=f"B&H DD: {bm_sm.get('Max Drawdown',0)*100:.1f}%",
-                   delta_color="inverse")
-        m6b.metric("CAGR",f"{sm.get('CAGR',0)*100:.1f}%")
+        met_col1,met_col2,met_col3,met_col4=st.columns(4)
+        met_col1.metric("Total Return (Strategy)",f"{(btr['equity_curve'].iloc[-1]/initial_cap-1)*100:.2f}%")
+        met_col2.metric("Sharpe Ratio",f"{sm.get('Sharpe Ratio',0):.2f}")
+        met_col3.metric("Max Drawdown",f"{sm.get('Max Drawdown',0)*100:.2f}%")
+        met_col4.metric("Benchmark Return",f"{(btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100:.2f}%")
         fbt=go.Figure()
         fbt.add_trace(go.Scatter(x=btr['equity_curve'].index,y=btr['equity_curve'],
                                   mode='lines',line=dict(color='#00f2ff',width=2),name='Strategy'))
@@ -2312,36 +2301,10 @@ with tab7:
             for dc in ['Entry Date','Exit Date']:
                 if dc in td.columns:
                     td[dc] = pd.to_datetime(td[dc]).apply(lambda x: x.date() if pd.notnull(x) else "Open")
-            # Add Strategy Portfolio Return % = PnL($) / initial_capital
-            if 'PnL ($)' in td.columns:
-                td['Portfolio Impact %'] = (td['PnL ($)'] / initial_cap * 100).round(2)
-            # Colour-code rows: green = profit, red = loss
-            def colour_row(row):
-                pnl = row.get('PnL (%)', 0)
-                if pnl is None: pnl = 0
-                try: pnl = float(pnl)
-                except: pnl = 0
-                color = 'background-color: #1a3a1a' if pnl > 0 else 'background-color: #3a1a1a' if pnl < 0 else ''
-                return [color] * len(row)
             fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (%)": "{:.2f}%"}
             if 'PnL ($)' in td.columns:
                 fmt['PnL ($)'] = "${:.2f}"
-            if 'Portfolio Impact %' in td.columns:
-                fmt['Portfolio Impact %'] = "{:.2f}%"
-            st.dataframe(
-                td.style.apply(colour_row, axis=1).format(fmt, na_rep="-"),
-                use_container_width=True
-            )
-            # Summary stats
-            closed = td[td['Status'] != 'Open']
-            if len(closed) > 0:
-                wins = closed[closed['PnL (%)'] > 0]
-                losses = closed[closed['PnL (%)'] <= 0]
-                sl1, sl2, sl3, sl4 = st.columns(4)
-                sl1.metric("Closed Trades", len(closed))
-                sl2.metric("Win Rate", f"{len(wins)/len(closed)*100:.0f}%" if len(closed) > 0 else "N/A")
-                sl3.metric("Avg Win", f"{wins['PnL (%)'].mean():.2f}%" if len(wins) > 0 else "N/A")
-                sl4.metric("Avg Loss", f"{losses['PnL (%)'].mean():.2f}%" if len(losses) > 0 else "N/A")
+            st.dataframe(td.style.format(fmt), use_container_width=True)
         else:
             st.info("No closed trades generated by the strategy.")
 
