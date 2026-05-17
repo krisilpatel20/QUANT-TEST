@@ -557,82 +557,91 @@ class BacktestEngine:
         prices = prices.loc[common_idx]; signals = signals.loc[common_idx]
         returns = prices.pct_change().fillna(0)
         equity_curve = [initial_capital]
-        trades = []; position = 0; entry_price = 0; entry_date = None
-        max_price = 0; cash = initial_capital; holdings = 0
-        cooldown = 0; prev_sig = 0.0; position_size_pct = 1.0
+        trades = []
+        position = 0; entry_price = 0; entry_date = None
+        max_price_since_entry = 0; cash = initial_capital; holdings = 0
+        cooldown_bars = 0
 
         for date, price, signal in zip(prices.index, prices, signals):
-            signal = float(signal)
-            if cooldown > 0:
-                cooldown -= 1
-                if signal == 0: cooldown = 0
+            if cooldown_bars > 0:
+                cooldown_bars -= 1
+                if signal == 0:
+                    cooldown_bars = 0
 
             if position == 1:
-                stop_out = False; smsg = ""
-                if stop_loss_pct > 0 and price <= entry_price*(1-stop_loss_pct):
-                    stop_out = True; smsg = 'Stop Loss'
+                current_val = cash + holdings * price
+                stop_out = False; status_msg = ""
+
+                if stop_loss_pct > 0:
+                    if price <= entry_price * (1 - stop_loss_pct):
+                        stop_out = True; status_msg = 'Stop Loss'
+
                 if not stop_out and trailing_stop_pct > 0:
-                    max_price = max(max_price, price)
-                    if price <= max_price*(1-trailing_stop_pct):
-                        stop_out = True; smsg = 'Trailing Stop'
+                    max_price_since_entry = max(max_price_since_entry, price)
+                    if price <= max_price_since_entry * (1 - trailing_stop_pct):
+                        stop_out = True; status_msg = 'Trailing Stop'
+
                 if stop_out:
                     position = 0
-                    exit_val = holdings * price
-                    cost_basis_stop = holdings * entry_price   # must calc BEFORE zeroing holdings
-                    cash = cash + exit_val
+                    exit_price = price
+                    # FIXED: calculate pnl BEFORE zeroing holdings
+                    pnl = (exit_price - entry_price) / entry_price
+                    cash = cash + holdings * exit_price
                     holdings = 0
-                    pnl_dollar = exit_val - cost_basis_stop
-                    pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
-                    trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
-                                   'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
-                                   'Size (%)':round(position_size_pct*100,1),
-                                   'PnL (% of Capital)':round(pnl_pct,2),
-                                   'PnL ($)':round(pnl_dollar,2),
-                                   'Status':smsg})
-                    equity_curve.append(cash); cooldown = 5; prev_sig = 0.0; continue
+                    trades.append({
+                        'Side': 'Long', 'Entry Date': entry_date, 'Exit Date': date,
+                        'Buy Price': entry_price, 'Sell Price': exit_price,
+                        'PnL (%)': round(pnl * 100, 2), 'Status': status_msg
+                    })
+                    equity_curve.append(cash)
+                    cooldown_bars = 5
+                    continue
+            else:
+                current_val = cash
 
-            if position == 0 and signal > 0 and cooldown == 0:
-                position = 1; entry_price = price; entry_date = date; max_price = price
-                position_size_pct = float(signal)  # fraction of capital invested
-                invest = cash * signal; holdings = invest/price; cash -= invest
+            if position == 0 and signal == 1 and cooldown_bars == 0:
+                position = 1
+                entry_price = price
+                entry_date = date
+                max_price_since_entry = price
+                holdings = cash / price
+                cash = 0
             elif position == 1 and signal == 0:
                 position = 0
-                exit_val = holdings * price
-                cash += exit_val
-                cost_basis = holdings * entry_price
-                pnl_dollar = exit_val - cost_basis
-                pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
+                exit_price = price
+                pnl = (exit_price - entry_price) / entry_price
+                cash = holdings * exit_price
                 holdings = 0
-                trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':date,
-                               'Buy Price':round(entry_price,2),'Sell Price':round(price,2),
-                               'Size (%)':round(position_size_pct*100,1),
-                               'PnL (% of Capital)':round(pnl_pct,2),
-                               'PnL ($)':round(pnl_dollar,2),
-                               'Status':'Closed'})
-            elif position == 1 and signal != prev_sig and signal > 0:
-                total = cash + holdings*price
-                holdings = (total*signal)/price; cash = total - holdings*price
-            prev_sig = signal
-            equity_curve.append((cash+holdings*price) if position==1 else cash)
+                trades.append({
+                    'Side': 'Long', 'Entry Date': entry_date, 'Exit Date': date,
+                    'Buy Price': entry_price, 'Sell Price': exit_price,
+                    'PnL (%)': round(pnl * 100, 2), 'Status': 'Closed'
+                })
+
+            if position == 1:
+                equity_curve.append(cash + holdings * price)
+            else:
+                equity_curve.append(cash)
 
         if position == 1:
-            cp = prices.iloc[-1]
-            open_val = holdings * cp
-            cost_basis = holdings * entry_price
-            pnl_dollar = open_val - cost_basis
-            pnl_pct = pnl_dollar / initial_capital * 100  # % of starting capital
-            trades.append({'Side':'Long','Entry Date':entry_date,'Exit Date':None,
-                           'Buy Price':round(entry_price,2),'Sell Price':round(cp,2),
-                           'Size (%)':round(position_size_pct*100,1),
-                           'PnL (% of Capital)':round(pnl_pct,2),
-                           'PnL ($)':round(pnl_dollar,2),
-                           'Status':'Open'})
-            equity_curve[-1] = cash + holdings*cp
+            current_price = prices.iloc[-1]
+            pnl = (current_price - entry_price) / entry_price
+            trades.append({
+                'Side': 'Long', 'Entry Date': entry_date, 'Exit Date': None,
+                'Buy Price': entry_price, 'Sell Price': current_price,
+                'PnL (%)': round(pnl * 100, 2), 'Status': 'Open'
+            })
+            equity_curve[-1] = cash + holdings * current_price
 
-        eq = pd.Series(equity_curve[1:], index=prices.index)
-        bm = initial_capital*(1+returns).cumprod()
-        return {'equity_curve':eq,'benchmark_curve':bm,
-                'trades':pd.DataFrame(trades),'returns':eq.pct_change().fillna(0)}
+        equity_curve_series = pd.Series(equity_curve[1:], index=prices.index)
+        benchmark_curve = initial_capital * (1 + returns).cumprod()
+        strat_returns = equity_curve_series.pct_change().fillna(0)
+        return {
+            'equity_curve': equity_curve_series,
+            'benchmark_curve': benchmark_curve,
+            'trades': pd.DataFrame(trades),
+            'returns': strat_returns
+        }
 
     @staticmethod
     def calculate_metrics(returns, risk_free_rate=0.0):
@@ -2287,20 +2296,15 @@ with tab7:
         if last_s>0: st.success(f"SIGNAL: LONG (size={last_s:.0%}) | {sigs_bt.index[-1].date()}")
         else: st.error(f"SIGNAL: CASH | {sigs_bt.index[-1].date()}")
         sm=BacktestEngine.calculate_metrics(btr['returns'],rf_rate)
-        strat_ret = (btr['equity_curve'].iloc[-1]/initial_cap-1)*100
-        bh_ret = (btr['benchmark_curve'].iloc[-1]/initial_cap-1)*100
-        total_pnl_dollar = btr['equity_curve'].iloc[-1] - initial_cap
-        met_col1,met_col2,met_col3,met_col4=st.columns(4)
-        met_col1.metric("Portfolio Return (Strategy)",
-                        f"{strat_ret:.2f}%",
-                        delta=f"{CURRENCY}{total_pnl_dollar:+,.0f} on {CURRENCY}{initial_cap:,.0f}")
-        met_col2.metric("Sharpe Ratio",f"{sm.get('Sharpe Ratio',0):.2f}")
-        met_col3.metric("Max Drawdown",f"{sm.get('Max Drawdown',0)*100:.2f}%")
-        met_col4.metric("Benchmark Return (B&H)",f"{bh_ret:.2f}%",
-                        delta=f"{strat_ret-bh_ret:+.2f}% vs strategy",
-                        delta_color="off")
-        st.caption("ℹ️ Portfolio Return = total equity growth. Trade PnL(%) = return on capital deployed in that specific trade. "
-                   "If position Size(%) < 100%, portfolio return will be lower than trade return — this is correct vol-targeted behaviour.")
+        met_col1, met_col2, met_col3, met_col4 = st.columns(4)
+        with met_col1:
+            st.metric("Total Return (Strategy)", f"{(btr['equity_curve'].iloc[-1]/initial_cap - 1)*100:.2f}%")
+        with met_col2:
+            st.metric("Sharpe Ratio", f"{strat_metrics.get('Sharpe Ratio', 0):.2f}")
+        with met_col3:
+            st.metric("Max Drawdown", f"{strat_metrics.get('Max Drawdown', 0)*100:.2f}%")
+        with met_col4:
+            st.metric("Benchmark Return", f"{(btr['benchmark_curve'].iloc[-1]/initial_cap - 1)*100:.2f}%")
         fbt=go.Figure()
         fbt.add_trace(go.Scatter(x=btr['equity_curve'].index,y=btr['equity_curve'],
                                   mode='lines',line=dict(color='#00f2ff',width=2),name='Strategy'))
@@ -2309,17 +2313,19 @@ with tab7:
         fbt.update_layout(title="Equity Curve",template="plotly_dark",height=400,hovermode="x unified")
         st.plotly_chart(fbt,use_container_width=True)
         if st.session_state.report_gen: st.session_state.report_gen.add_plot("Backtest",fbt)
-        if not btr['trades'].empty:
-            td = btr['trades'].copy()
-            for dc in ['Entry Date','Exit Date']:
-                if dc in td.columns:
-                    td[dc] = pd.to_datetime(td[dc]).apply(lambda x: x.date() if pd.notnull(x) else "Open")
-            fmt = {"Buy Price": "{:.2f}", "Sell Price": "{:.2f}", "PnL (% of Capital)": "{:.2f}%"}
-            if 'Size (%)' in td.columns:
-                fmt['Size (%)'] = "{:.1f}%"
-            if 'PnL ($)' in td.columns:
-                fmt['PnL ($)'] = "${:.2f}"
-            st.dataframe(td.style.format(fmt), use_container_width=True)
+        # Trade Log
+        st.write("#### 📝 Trade Log")
+        trades_df = btr['trades']
+        if not trades_df.empty:
+            trades_df = trades_df.copy()
+            trades_df['Entry Date'] = pd.to_datetime(trades_df['Entry Date']).dt.date
+            trades_df['Exit Date'] = pd.to_datetime(trades_df['Exit Date']).apply(
+                lambda x: x.date() if pd.notnull(x) else "Open")
+            st.dataframe(trades_df.style.format({
+                "Buy Price": "{:.2f}",
+                "Sell Price": "{:.2f}",
+                "PnL (%)": "{:.2f}%"
+            }), use_container_width=True)
         else:
             st.info("No closed trades generated by the strategy.")
 
